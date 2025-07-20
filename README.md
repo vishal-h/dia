@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # dia
 Distributed Intelligence Agency
 =======
@@ -146,4 +145,3 @@ iex(5)> DIA.Agent.QueryParser.parse(reg_key, "Hello, how         are you!  ")
   end
 
 ```
->>>>>>> initial commit. add project structure and supervison tree. add basic agent and llm functionalities
