@@ -69,15 +69,19 @@ iex> DIA.LLM.FunctionExporter.export_all()
 iex> IO.puts DIA.LLM.FunctionExporter.to_json()
 iex> DIA.LLM.FunctionExporter.build_func_name(:query_parser, :parse)
 
-iex> DIA.LLM.FunctionRouter.route("query_parser:parse",%{"query" => "Hello world!"},1,1)
+iex> DIA.LLM.FunctionRouter.route("query_parser:parse",%{"query" => "Hello world!"},1,1,1)
 
 iex> mix llm_trace DIA.LLM.FunctionRouter.route/4 --name=query_parser --verbose
 
 iex> mix llm_trace DIA.LLM.FunctionExporter.export_all/0 --name=function_exporter --ai
 
+iex> mix llm_trace DIA.LLM.FunctionExporter.to_json/0 --name=function_exporter_json --ai
+
 iex> mix llm_ingest --feature=query_parser
 
 iex> mix llm_ingest --feature=function_exporter
+
+iex> mix llm_ingest --feature=function_exporter_json
 
 
 ```
