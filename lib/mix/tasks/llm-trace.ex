@@ -6,11 +6,26 @@ defmodule Mix.Tasks.LlmTrace do
   @moduledoc """
   Automatically discover feature boundaries by tracing function calls and dependencies.
 
-  Usage:
+  Basic Usage:
     mix llm_trace DIA.LLM.FunctionRouter.route/4 --name=query_parser
     mix llm_trace MyApp.Auth.login/2 --name=auth --depth=3
     mix llm_trace "MyApp.Payments.process_payment/3" --runtime
     mix llm_trace DIA.LLM.FunctionRouter.route/4 --name=query_parser --verbose
+
+  AI-Enhanced Usage:
+    mix llm_trace DIA.LLM.FunctionRouter.route/4 --name=query_parser --ai
+    mix llm_trace MyApp.Feature.main/1 --ai --ai-model=gpt-4o --verbose
+
+  AI Features:
+    - Smart feature naming suggestions
+    - Comprehensive feature descriptions
+    - Complexity analysis and architectural pattern detection
+    - Improvement recommendations
+    - Related module suggestions
+
+  Requirements for AI features:
+    - Set OPENAI_API_KEY environment variable, or use --ai-api-key
+    - Req and Jason dependencies (add to mix.exs)
   """
 
   # Suppress warnings for Erlang modules that are loaded at runtime
@@ -25,7 +40,10 @@ defmodule Mix.Tasks.LlmTrace do
         runtime: :boolean,
         output: :string,
         include_tests: :boolean,
-        verbose: :boolean
+        verbose: :boolean,
+        ai: :boolean,
+        ai_model: :string,
+        ai_api_key: :string
       ]
     )
 
@@ -34,9 +52,15 @@ defmodule Mix.Tasks.LlmTrace do
     use_runtime = opts[:runtime] || false
     include_tests = opts[:include_tests] || true
     verbose = opts[:verbose] || false
+    use_ai = opts[:ai] || false
+    ai_model = opts[:ai_model] || "gpt-4o-mini"
+    ai_api_key = opts[:ai_api_key] || System.get_env("OPENAI_API_KEY")
 
-    # Store verbose flag globally for helper functions
+    # Store options globally for helper functions
     Process.put(:llm_trace_verbose, verbose)
+    Process.put(:llm_trace_ai_enabled, use_ai)
+    Process.put(:llm_trace_ai_model, ai_model)
+    Process.put(:llm_trace_ai_api_key, ai_api_key)
 
     Mix.shell().info("Tracing feature: #{feature_name}")
     Mix.shell().info("Starting from: #{target}")
@@ -54,8 +78,12 @@ defmodule Mix.Tasks.LlmTrace do
     # Convert to file patterns
     patterns = dependencies_to_patterns(dependencies, include_tests)
 
-    # Generate feature configuration
-    feature_config = generate_feature_config(feature_name, patterns)
+    # Generate feature configuration with optional AI enhancement
+    feature_config = if use_ai do
+      enhance_with_ai(feature_name, dependencies, patterns)
+    else
+      generate_feature_config(feature_name, patterns)
+    end
 
     # Output results
     output_path = opts[:output] || "llm_features_traced.exs"
@@ -635,13 +663,284 @@ defmodule Mix.Tasks.LlmTrace do
     }
   end
 
+  # AI-Enhanced Feature Configuration
+  defp enhance_with_ai(feature_name, discovered_modules, patterns) do
+    if ai_enabled?() do
+      Mix.shell().info("🤖 Enhancing feature analysis with AI...")
+
+      case analyze_feature_with_ai(feature_name, discovered_modules, patterns) do
+        {:ok, ai_analysis} ->
+          %{
+            include: Enum.join(patterns, ","),
+            exclude: "**/*_test.exs",
+            description: ai_analysis.description,
+            suggested_name: ai_analysis.better_name,
+            related_modules: ai_analysis.related_modules,
+            complexity: ai_analysis.complexity,
+            patterns: ai_analysis.patterns,
+            recommendations: ai_analysis.recommendations
+          }
+
+        {:error, reason} ->
+          Mix.shell().error("AI analysis failed: #{reason}")
+          generate_feature_config(feature_name, patterns)
+      end
+    else
+      generate_feature_config(feature_name, patterns)
+    end
+  end
+
+  defp ai_enabled?() do
+    Process.get(:llm_trace_ai_enabled, false) &&
+    Process.get(:llm_trace_ai_api_key) != nil
+  end
+
+  defp analyze_feature_with_ai(feature_name, discovered_modules, patterns) do
+    modules_info = extract_modules_info(discovered_modules)
+
+    prompt = build_analysis_prompt(feature_name, modules_info, patterns)
+
+    case call_openai_api(prompt) do
+      {:ok, response} -> parse_ai_response(response)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp extract_modules_info(discovered_modules) do
+    discovered_modules
+    |> Enum.map(fn
+      {module, _fun, _arity} -> module
+      module when is_atom(module) -> module
+    end)
+    |> Enum.uniq()
+    |> Enum.map(fn module ->
+      module_name = module |> to_string() |> String.replace("Elixir.", "")
+
+      # Try to get some context about what this module might do
+      context = infer_module_purpose(module_name)
+
+      %{
+        name: module_name,
+        inferred_purpose: context
+      }
+    end)
+  end
+
+  defp infer_module_purpose(module_name) do
+    cond do
+      String.contains?(module_name, "Controller") -> "Web request handling"
+      String.contains?(module_name, "GenServer") -> "Stateful process management"
+      String.contains?(module_name, "Supervisor") -> "Process supervision"
+      String.contains?(module_name, "Router") -> "Request routing"
+      String.contains?(module_name, "Schema") -> "Data structure definition"
+      String.contains?(module_name, "Migration") -> "Database schema changes"
+      String.contains?(module_name, "Agent") -> "Lightweight state management"
+      String.contains?(module_name, "Registry") -> "Process registration and lookup"
+      String.contains?(module_name, "Auth") -> "Authentication/authorization"
+      String.contains?(module_name, "LLM") -> "Large Language Model integration"
+      String.contains?(module_name, "Query") -> "Query processing/parsing"
+      String.contains?(module_name, "Parser") -> "Data parsing/transformation"
+      String.contains?(module_name, "Worker") -> "Background job processing"
+      String.contains?(module_name, "Client") -> "External service client"
+      String.contains?(module_name, "Service") -> "Business logic service"
+      true -> "General purpose module"
+    end
+  end
+
+  defp build_analysis_prompt(feature_name, modules_info, patterns) do
+    modules_summary = Enum.map_join(modules_info, "\n", fn module ->
+      "- #{module.name}: #{module.inferred_purpose}"
+    end)
+
+    """
+    You are an expert Elixir developer analyzing a feature's codebase structure.
+
+    FEATURE NAME: #{feature_name}
+
+    DISCOVERED MODULES:
+    #{modules_summary}
+
+    FILE PATTERNS:
+    #{Enum.join(patterns, "\n")}
+
+    Please analyze this feature and provide:
+
+    1. A better, more descriptive feature name (if the current one could be improved)
+    2. A comprehensive description of what this feature does
+    3. The complexity level (low/medium/high) based on module count and interactions
+    4. Key architectural patterns you can identify
+    5. Recommendations for improvement or refactoring
+    6. Related modules that might be missing from this analysis
+
+    Respond in JSON format:
+    {
+      "better_name": "suggested_feature_name",
+      "description": "Detailed description of what this feature accomplishes",
+      "complexity": "low|medium|high",
+      "patterns": ["pattern1", "pattern2"],
+      "recommendations": ["recommendation1", "recommendation2"],
+      "related_modules": ["module1", "module2"]
+    }
+
+    Focus on Elixir/Phoenix patterns like GenServers, Supervisors, Contexts, etc.
+    """
+  end
+
+  defp call_openai_api(prompt) do
+    api_key = Process.get(:llm_trace_ai_api_key)
+    model = Process.get(:llm_trace_ai_model, "gpt-4o-mini")
+
+    request_body = %{
+      model: model,
+      messages: [
+        %{
+          role: "system",
+          content: "You are an expert Elixir developer and software architect."
+        },
+        %{
+          role: "user",
+          content: prompt
+        }
+      ],
+      temperature: 0.3,
+      max_tokens: 1000
+    }
+
+    debug_info("🤖 Calling OpenAI API with model: #{model}")
+
+    # Ensure Finch is started for Req
+    case ensure_finch_started() do
+      :ok ->
+        make_api_request(request_body, api_key)
+      {:error, reason} ->
+        {:error, "Failed to start HTTP client: #{reason}"}
+    end
+  rescue
+    e ->
+      {:error, "Exception during API call: #{inspect(e)}"}
+  end
+
+  defp ensure_finch_started() do
+    case Process.whereis(LlmTrace.Finch) do
+      nil ->
+        # Start Finch directly without supervisor
+        debug_info("Starting Finch HTTP client...")
+        case Finch.start_link(name: LlmTrace.Finch) do
+          {:ok, _pid} ->
+            debug_info("Finch started successfully")
+            :ok
+          {:error, {:already_started, _pid}} ->
+            debug_info("Finch already running")
+            :ok
+          {:error, reason} ->
+            debug_info("Failed to start Finch: #{inspect(reason)}")
+            {:error, reason}
+        end
+      _pid ->
+        debug_info("Finch already running")
+        :ok
+    end
+  rescue
+    e ->
+      debug_info("Exception starting Finch: #{inspect(e)}")
+      {:error, inspect(e)}
+  end
+
+  defp make_api_request(request_body, api_key) do
+    case Req.post("https://api.openai.com/v1/chat/completions",
+      headers: [authorization: "Bearer #{api_key}"],
+      json: request_body,
+      receive_timeout: 30_000,
+      finch: LlmTrace.Finch
+    ) do
+      {:ok, %Req.Response{status: 200, body: %{"choices" => [%{"message" => %{"content" => content}} | _]}}} ->
+        {:ok, content}
+
+      {:ok, %Req.Response{status: status, body: error_body}} ->
+        {:error, "API request failed with status #{status}: #{inspect(error_body)}"}
+
+      {:error, %Req.TransportError{reason: reason}} ->
+        {:error, "Request failed: #{inspect(reason)}"}
+
+      {:error, exception} ->
+        {:error, "Request exception: #{inspect(exception)}"}
+    end
+  end
+
+  defp parse_ai_response(response_content) do
+    # Try to extract JSON from the response (AI might include extra text)
+    json_match = Regex.run(~r/\{.*\}/s, response_content)
+
+    case json_match do
+      [json_string] ->
+        case Jason.decode(json_string) do
+          {:ok, parsed} ->
+            ai_analysis = %{
+              better_name: Map.get(parsed, "better_name", "unknown"),
+              description: Map.get(parsed, "description", "AI analysis failed"),
+              complexity: Map.get(parsed, "complexity", "unknown"),
+              patterns: Map.get(parsed, "patterns", []),
+              recommendations: Map.get(parsed, "recommendations", []),
+              related_modules: Map.get(parsed, "related_modules", [])
+            }
+            {:ok, ai_analysis}
+
+          {:error, decode_error} ->
+            {:error, "Failed to parse AI response JSON: #{inspect(decode_error)}"}
+        end
+
+      nil ->
+        # Fallback: try to parse the entire response as JSON
+        case Jason.decode(response_content) do
+          {:ok, parsed} ->
+            ai_analysis = %{
+              better_name: Map.get(parsed, "better_name", "unknown"),
+              description: Map.get(parsed, "description", response_content),
+              complexity: Map.get(parsed, "complexity", "unknown"),
+              patterns: Map.get(parsed, "patterns", []),
+              recommendations: Map.get(parsed, "recommendations", []),
+              related_modules: Map.get(parsed, "related_modules", [])
+            }
+            {:ok, ai_analysis}
+
+          {:error, _} ->
+            # If all else fails, use the raw response as description
+            ai_analysis = %{
+              better_name: "ai_analyzed_feature",
+              description: response_content,
+              complexity: "unknown",
+              patterns: [],
+              recommendations: [],
+              related_modules: []
+            }
+            {:ok, ai_analysis}
+        end
+    end
+  end
+
   defp write_feature_config(output_path, feature_name, config) do
     # Read existing config or create new
     existing_config = if File.exists?(output_path) do
-      {config, _} = Code.eval_file(output_path)
-      config
+      try do
+        {existing, _} = Code.eval_file(output_path)
+        debug_info("Found existing config with #{map_size(existing)} features")
+        existing
+      rescue
+        e ->
+          Mix.shell().error("Failed to read existing config: #{inspect(e)}")
+          Mix.shell().info("Creating new config file")
+          %{}
+      end
     else
+      debug_info("Creating new config file")
       %{}
+    end
+
+    # Check if we're updating an existing feature
+    action = if Map.has_key?(existing_config, feature_name) do
+      "Updated"
+    else
+      "Added"
     end
 
     # Merge new feature
@@ -651,11 +950,15 @@ defmodule Mix.Tasks.LlmTrace do
     content = """
     # Auto-generated LLM feature configuration
     # Generated by: mix llm_trace
+    # Features: #{Map.keys(updated_config) |> Enum.join(", ")}
 
     #{inspect(updated_config, pretty: true)}
     """
 
     File.write!(output_path, content)
+
+    Mix.shell().info("#{action} feature '#{feature_name}' in #{output_path}")
+    Mix.shell().info("Total features in config: #{map_size(updated_config)}")
   end
 
   defp print_summary(dependencies, patterns) do
