@@ -14,6 +14,8 @@ iex> DIA.Agent.QueryParser.describe()
 
 iex> for i <- 1..3, j <- 1..3, do: DIA.Agent.dispatch_by_type(:query_parser, :parse, [%{"query" => " hello world #{i}#{j} ! "}], i, j)
 
+iex> for i <- 1..2, j <- 1..2, k <- 1..2, do: DIA.Agent.dispatch_by_type(:query_parser, :parse, [%{"query" => " hello world user:#{i} chat_session:#{j} login_session#{k} ! "}], i, j,k)
+
 iex> DIA.Agent.TypeRegistry.get(:query_parser)
 {:ok, %{name: :query_parser, module: DIA.Agent.QueryParser, ...}}
 

@@ -9,7 +9,8 @@ defmodule DIA.LLM.FunctionRouter do
   @type function_name :: String.t()
   @type input_args :: map()
   @type user_id :: String.t()
-  @type session_id :: String.t()
+  @type chat_session_id :: String.t()
+  @type login_session_id :: String.t()
 
   @doc """
   Routes a function call (like "query_parser_parse") to the appropriate agent.
@@ -17,12 +18,12 @@ defmodule DIA.LLM.FunctionRouter do
   Example:
       route("query_parser_parse", %{"query" => "hi"}, "u1", "s1")
   """
-  @spec route(function_name(), input_args(), user_id(), session_id()) ::
+  @spec route(function_name(), input_args(), user_id(), chat_session_id(), login_session_id()) ::
           {:ok, any()} | {:error, term()}
-  def route(func_name, args, user_id, session_id) when is_map(args) do
+  def route(func_name, args, user_id, chat_session_id, login_session_id \\ nil) when is_map(args) do
     case parse_function_name(func_name) do
       {:ok, {agent_type, function}} ->
-        Agent.dispatch_by_type(agent_type, function, [args], user_id, session_id)
+        Agent.dispatch_by_type(agent_type, function, [args], user_id, chat_session_id, login_session_id)
 
       {:error, reason} ->
         {:error, reason}

@@ -166,9 +166,46 @@ They are parsed and routed by `DIA.LLM.FunctionRouter`.
 
 Happy hacking! 🤖
 
+
+
+## 🔁 Agent Registration Key Migration Note
+
+### Previous Format:
+```elixir
+{agent_type, user_id, chat_session_id}
+````
+
+### New Format:
+
+```elixir
+{agent_type, user_id, chat_session_id, login_session_id}
 ```
 
----
+To support tracking **per-device login sessions**, agents now use a structured `DIA.Agent.RegKey` for registration and lookup.
 
-Let me know if you'd like a template Livebook or starter test module for new agents as well!
+### Benefits:
+
+* Allows multiple devices to run isolated agent processes for the same user
+* Enables targeted cleanup, audit, or analytics per login session
+* Makes agent keys extensible and self-documenting
+
+### What Changed:
+
+* `reg_key` is now a **struct**: `%DIA.Agent.RegKey{...}`
+* It is converted to a 4-element tuple for `Registry` compatibility
+* All agent modules receive a `reg_key` that includes `login_session_id` (or `nil` if not provided)
+* `DIA.Agent.resolve_pid/4` now accepts optional `login_session_id`
+
+### Backward Compatibility:
+
+If `login_session_id` is not provided, the system still works as before. No immediate changes are required to existing clients unless they wish to scope agents by login session.
+
+### Example:
+
+```elixir
+# Previously:
+{:ok, pid} = DIA.Agent.resolve_pid(DIA.Agent.QueryParser, "u1", "chat1")
+
+# Now (optional login session ID):
+{:ok, pid} = DIA.Agent.resolve_pid(DIA.Agent.QueryParser, "u1", "chat1", "device_42")
 ```
