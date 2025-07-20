@@ -1,6 +1,3 @@
-# dia
-Distributed Intelligence Agency
-=======
 # DIA
 
 **Distributed Intelligence Agency**
