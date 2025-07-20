@@ -5,6 +5,7 @@ defmodule DIA.MixProject do
     [
       app: :dia,
       version: "0.1.0",
+      description: "Distributed Intelligent Agents",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       deps: deps()
