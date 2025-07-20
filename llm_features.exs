@@ -6,7 +6,13 @@
   "query_parser" => %{
     exclude: "**/*_test.exs",
     include: "lib/dia/agent/dynamic_supervisor.ex,lib/dia/agent.ex,lib/dia/agent/type_registry.ex,lib/dia/llm/function_router.ex,lib/dia/agent/reg_key.ex,test/dia/agent/dynamic_supervisor_test.exs,test/dia/agent_test.exs,test/dia/agent/type_registry_test.exs,test/dia/llm/function_router_test.exs,test/dia/agent/reg_key_test.exs",
-    description: "Auto-generated from code tracing query_parser"
+    description: "The DynamicQueryProcessor feature is responsible for managing the parsing and routing of queries to various functions within the system. It utilizes a dynamic supervisor to manage the lifecycle of processes that handle state management and type registration for different query types. The feature allows for flexible request routing based on the function definitions registered in the TypeRegistry, facilitating efficient query handling and state management.",
+    related_modules: ["DIA.QueryParser", "DIA.Agent.QueryHandler"],
+    complexity: "medium",
+    patterns: ["GenServer", "Supervisor", "Registry"],
+    recommendations: ["Consider consolidating lightweight state management modules (DIA.Agent, DIA.Agent.TypeRegistry, DIA.Agent.RegKey) into a single context to reduce complexity and improve maintainability.",
+     "Implement more comprehensive documentation and comments within the codebase to clarify the purpose and interactions of each module, especially for new developers."],
+    suggested_name: "DynamicQueryProcessor"
   }
 }
 

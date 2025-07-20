@@ -73,7 +73,12 @@ iex> DIA.LLM.FunctionRouter.route("query_parser:parse",%{"query" => "Hello world
 
 iex> mix llm_trace DIA.LLM.FunctionRouter.route/4 --name=query_parser --verbose
 
+iex> mix llm_trace DIA.LLM.FunctionExporter.export_all/0 --name=function_exporter --ai
+
 iex> mix llm_ingest --feature=query_parser
+
+iex> mix llm_ingest --feature=function_exporter
+
 
 ```
 **Naming**

@@ -73,18 +73,14 @@ defmodule Mix.Tasks.LlmIngest do
 
     # Add feature section if a feature was specified
     if opts[:feature] do
-      feature_section = "## Feature: #{opts[:feature]}\n\n" <>
-        case feature_include do
-          nil -> "Feature configuration not found or invalid."
-          patterns ->
-            include_text = "**Include patterns:** `#{Enum.join(patterns, "`, `")}`\n\n"
-            exclude_text = case feature_exclude do
-              [] -> ""
-              excludes -> "**Exclude patterns:** `#{Enum.join(excludes, "`, `")}`\n\n"
-            end
-            include_text <> exclude_text
-        end
+      feature_section = generate_feature_section(opts[:feature], feature_include, feature_exclude)
       write_section(output_file, feature_section)
+    end
+
+    # Add notes section for LLM guidance
+    notes_section = generate_notes_section(opts[:feature], include_patterns)
+    if notes_section do
+      write_section(output_file, notes_section)
     end
 
     # Add folder structure section with markdown header
@@ -98,39 +94,244 @@ defmodule Mix.Tasks.LlmIngest do
     Mix.shell().info("Generated #{output_file}")
   end
 
+  defp generate_feature_section(feature_name, feature_include, feature_exclude) do
+    case feature_include do
+      nil ->
+        "## Feature: #{feature_name}\n\nFeature configuration not found or invalid."
+      patterns when is_list(patterns) ->
+        build_enhanced_feature_section(feature_name, patterns, feature_exclude)
+      include_string when is_binary(include_string) ->
+        patterns = String.split(include_string, ",") |> Enum.map(&String.trim/1)
+        build_enhanced_feature_section(feature_name, patterns, feature_exclude)
+    end
+  end
+
+  defp build_enhanced_feature_section(feature_name, patterns, exclude_patterns) do
+    # Try to get enhanced feature config from llm_features_traced.exs or similar
+    enhanced_config = get_enhanced_feature_config(feature_name)
+
+    case enhanced_config do
+      %{description: ai_description} when ai_description != nil ->
+        build_ai_enhanced_section(feature_name, patterns, exclude_patterns, enhanced_config)
+
+      _ ->
+        build_basic_feature_section(feature_name, patterns, exclude_patterns)
+    end
+  end
+
+  defp build_ai_enhanced_section(feature_name, patterns, exclude_patterns, config) do
+    header = "## Feature: #{feature_name}"
+
+    # Use AI-suggested name if available
+    header = case Map.get(config, :suggested_name) do
+      nil -> header
+      suggested when is_binary(suggested) ->
+        "## Feature: #{feature_name} (AI Suggests: #{suggested})"
+      _ -> header
+    end
+
+    description_section = case Map.get(config, :description) do
+      nil -> ""
+      desc -> "\n### Description\n#{desc}\n"
+    end
+
+    metadata_section = build_metadata_section(config)
+
+    patterns_section = build_patterns_section(patterns, exclude_patterns)
+
+    recommendations_section = build_recommendations_section(config)
+
+    "#{header}#{description_section}#{metadata_section}#{patterns_section}#{recommendations_section}"
+  end
+
+  defp build_metadata_section(config) do
+    metadata_items = []
+
+    metadata_items = case Map.get(config, :complexity) do
+      nil -> metadata_items
+      complexity -> ["**Complexity:** #{String.capitalize(complexity)}" | metadata_items]
+    end
+
+    metadata_items = case Map.get(config, :patterns) do
+      nil -> metadata_items
+      [] -> metadata_items
+      patterns when is_list(patterns) ->
+        ["**Architecture Patterns:** #{Enum.join(patterns, ", ")}" | metadata_items]
+      _ -> metadata_items
+    end
+
+    metadata_items = case Map.get(config, :related_modules) do
+      nil -> metadata_items
+      [] -> metadata_items
+      modules when is_list(modules) ->
+        ["**Related Modules:** #{Enum.join(modules, ", ")}" | metadata_items]
+      _ -> metadata_items
+    end
+
+    case metadata_items do
+      [] -> ""
+      items ->
+        "\n### Feature Metadata\n" <>
+        Enum.map_join(Enum.reverse(items), "\n", fn item -> "#{item}" end) <> "\n"
+    end
+  end
+
+  defp build_recommendations_section(config) do
+    case Map.get(config, :recommendations) do
+      nil -> ""
+      [] -> ""
+      recommendations when is_list(recommendations) ->
+        formatted_recommendations = Enum.with_index(recommendations, 1)
+        |> Enum.map_join("\n", fn {rec, index} -> "#{index}. #{rec}" end)
+
+        "\n### AI Recommendations\n#{formatted_recommendations}\n"
+      _ -> ""
+    end
+  end
+
+  defp build_patterns_section(patterns, exclude_patterns) do
+    include_text = "**Include patterns:** `#{Enum.join(patterns, "`, `")}`\n"
+    exclude_text = case exclude_patterns do
+      [] -> ""
+      nil -> ""
+      excludes when is_list(excludes) -> "**Exclude patterns:** `#{Enum.join(excludes, "`, `")}`\n"
+      exclude_string when is_binary(exclude_string) -> "**Exclude patterns:** `#{exclude_string}`\n"
+      _ -> ""
+    end
+
+    "\n### File Patterns\n#{include_text}#{exclude_text}"
+  end
+
+  defp build_basic_feature_section(feature_name, patterns, exclude_patterns) do
+    header = "## Feature: #{feature_name}\n"
+    patterns_section = build_patterns_section(patterns, exclude_patterns)
+    "#{header}#{patterns_section}"
+  end
+
+  defp get_enhanced_feature_config(feature_name) do
+    # Try multiple sources for enhanced config
+    enhanced_files = [
+      "llm_features_traced.exs",
+      "llm_features_enhanced.exs",
+      "llm_features.exs"
+    ]
+
+    Enum.find_value(enhanced_files, fn file ->
+      if File.exists?(file) do
+        try do
+          {config, _} = Code.eval_file(file)
+          case Map.get(config, feature_name) do
+            nil -> nil
+            feature_config when is_map(feature_config) ->
+              # Convert string keys to atoms for easier access
+              feature_config
+              |> Enum.map(fn {k, v} -> {ensure_atom(k), v} end)
+              |> Enum.into(%{})
+            _ -> nil
+          end
+        rescue
+          _ -> nil
+        end
+      else
+        nil
+      end
+    end)
+  end
+
+  defp ensure_atom(key) when is_atom(key), do: key
+  defp ensure_atom(key) when is_binary(key) do
+    try do
+      String.to_existing_atom(key)
+    rescue
+      ArgumentError -> String.to_atom(key)
+    end
+  end
+  defp ensure_atom(key), do: key
+
   defp load_feature_config(nil, _root), do: {nil, []}
   defp load_feature_config(feature_name, root) do
-    config_file = Path.join(root, "llm_features.exs")
+    # Try multiple config files in order of preference
+    config_files = [
+      "llm_features_traced.exs",  # AI-generated features (try first)
+      "llm_features.exs",         # Manual features
+      "llm_features_enhanced.exs" # Alternative naming
+    ]
 
-    if File.exists?(config_file) do
-      try do
-        {features_config, _} = Code.eval_file(config_file)
+    Enum.find_value(config_files, fn config_file ->
+      config_path = Path.join(root, config_file)
 
-        case Map.get(features_config, feature_name) do
-          nil ->
-            Mix.shell().error("Feature '#{feature_name}' not found in llm_features.exs")
-            available_features = Map.keys(features_config) |> Enum.join(", ")
-            Mix.shell().info("Available features: #{available_features}")
-            {nil, []}
+      if File.exists?(config_path) do
+        try do
+          {features_config, _} = Code.eval_file(config_path)
 
-          feature_config ->
-            include_patterns = parse_patterns(feature_config[:include])
-            exclude_patterns = parse_patterns(feature_config[:exclude]) || []
-            Mix.shell().info("Loaded feature '#{feature_name}' with #{length(include_patterns || [])} include patterns")
-            Mix.shell().info("Include patterns: #{inspect(include_patterns)}")
-            {include_patterns, exclude_patterns}
+          case Map.get(features_config, feature_name) do
+            nil ->
+              debug_info("Feature '#{feature_name}' not found in #{config_file}")
+              nil
+
+            feature_config ->
+              Mix.shell().info("Found feature '#{feature_name}' in #{config_file}")
+              include_patterns = parse_patterns(feature_config[:include])
+              exclude_patterns = parse_patterns(feature_config[:exclude]) || []
+              {:found, {include_patterns, exclude_patterns}}
+          end
+        rescue
+          e ->
+            Mix.shell().error("Failed to load #{config_file}: #{inspect(e)}")
+            nil
         end
-      rescue
-        e ->
-          Mix.shell().error("Failed to load llm_features.exs: #{inspect(e)}")
-          {nil, []}
+      else
+        debug_info("Config file #{config_file} not found")
+        nil
       end
-    else
-      Mix.shell().error("Feature configuration file 'llm_features.exs' not found in project root")
-      Mix.shell().info("Create llm_features.exs with your feature definitions")
-      print_example_config()
-      {nil, []}
+    end)
+    |> case do
+      {:found, result} -> result
+      nil -> handle_feature_not_found(feature_name, config_files)
     end
+  end
+
+  defp handle_feature_not_found(feature_name, checked_files) do
+    Mix.shell().error("Feature '#{feature_name}' not found in any config file")
+
+    # Show which files were checked
+    Mix.shell().info("Checked files: #{Enum.join(checked_files, ", ")}")
+
+    # Try to show available features from all files
+    available_features = get_all_available_features(checked_files)
+
+    if length(available_features) > 0 do
+      Mix.shell().info("Available features: #{Enum.join(available_features, ", ")}")
+    else
+      Mix.shell().info("No feature configuration files found")
+      print_example_config()
+    end
+
+    {nil, []}
+  end
+
+  defp get_all_available_features(config_files) do
+    config_files
+    |> Enum.flat_map(fn file ->
+      if File.exists?(file) do
+        try do
+          {config, _} = Code.eval_file(file)
+          Map.keys(config)
+        rescue
+          _ -> []
+        end
+      else
+        []
+      end
+    end)
+    |> Enum.uniq()
+  end
+
+  # Helper function for conditional debug output
+  defp debug_info(message) do
+    # For now, always show these info messages since they're helpful
+    # You could make this conditional based on a --verbose flag if needed
+    Mix.shell().info(message)
   end
 
   defp print_example_config do
@@ -189,13 +390,6 @@ defmodule Mix.Tasks.LlmIngest do
         |> Enum.reject(&should_exclude?(&1, path, exclude_patterns))
         |> Enum.filter(&should_include?(&1, path, include_patterns))
         |> Enum.sort()
-
-      # Debug output
-      if is_root and include_patterns do
-        all_children = File.ls!(path)
-        Mix.shell().info("Root directory children: #{inspect(all_children)}")
-        Mix.shell().info("After filtering: #{inspect(children)}")
-      end
 
       children
       |> Enum.with_index()
@@ -290,8 +484,6 @@ defmodule Mix.Tasks.LlmIngest do
       end
     end)
   end
-
-
 
   defp matches_any_pattern?(item, patterns) when is_list(patterns) do
     Enum.any?(patterns, fn pattern ->
@@ -410,5 +602,96 @@ defmodule Mix.Tasks.LlmIngest do
         []
       end
     end
+  end
+
+  defp generate_notes_section(feature, include_patterns) do
+    cond do
+      # Feature-specific notes
+      feature ->
+        feature_notes = get_feature_specific_notes(feature)
+        general_notes = get_general_elixir_notes()
+        "## Notes for AI Analysis\n\n#{feature_notes}\n#{general_notes}"
+
+      # General project notes when no feature specified
+      include_patterns ->
+        "## Notes for AI Analysis\n\n#{get_general_elixir_notes()}"
+
+      # No notes for very basic usage
+      true -> nil
+    end
+  end
+
+  defp get_feature_specific_notes(feature) do
+    case feature do
+      "agent" -> """
+**Agent Feature Context:**
+- Look for `GenServer`, `Agent`, or `Task` implementations for stateful processes
+- Check for supervision trees in application.ex or dedicated supervisors
+- Agent modules typically handle state management and async operations
+- Pay attention to process lifecycle, message passing, and error handling
+"""
+
+      "auth" -> """
+**Authentication Feature Context:**
+- Look for authentication pipelines, plugs, and middleware
+- Check for token generation, validation, and refresh logic
+- Review password hashing, session management, and security measures
+- Pay attention to authorization rules and permission checking
+"""
+
+      "api" -> """
+**API Feature Context:**
+- Focus on Phoenix controllers, views, and serializers
+- Check for API versioning, content negotiation, and response formatting
+- Look for input validation, parameter parsing, and error handling
+- Review rate limiting, authentication middleware, and CORS configuration
+"""
+
+      "frontend" -> """
+**Frontend Feature Context:**
+- Focus on Phoenix LiveView components and templates
+- Check for JavaScript integration, asset pipeline, and CSS organization
+- Look for form handling, real-time updates, and user interactions
+- Review component composition and state management patterns
+"""
+
+      _ -> """
+**#{String.capitalize(feature)} Feature Context:**
+- This is a custom feature - analyze the included files for patterns and responsibilities
+- Look for module boundaries, data flow, and integration points
+- Check for supervision, error handling, and configuration management
+"""
+    end
+  end
+
+  defp get_general_elixir_notes do
+    """
+
+**General Elixir Project Reading Guide:**
+
+**Application Structure:**
+- `application.ex` defines the supervision tree and application startup
+- `lib/` contains the core application modules
+- `test/` contains unit and integration tests
+- `config/` contains environment-specific configuration
+
+**Module Conventions:**
+- Module names follow the project namespace (e.g., `MyApp.Module`)
+- GenServers handle stateful processes and long-running tasks
+- Contexts group related functionality (e.g., `Accounts`, `Billing`)
+- Schemas define data structures and database mappings
+
+**Key Patterns:**
+- `use` statements import common functionality
+- `|>` pipe operator chains function calls
+- Pattern matching in function heads for different cases
+- `with` statements for happy path error handling
+- Supervision trees for fault tolerance
+
+**Testing:**
+- Test files end with `_test.exs`
+- ExUnit provides the testing framework
+- Mocks and stubs are typically done with libraries like Mox
+"""
   end
 end
