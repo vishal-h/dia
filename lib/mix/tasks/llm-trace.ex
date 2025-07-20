@@ -10,6 +10,7 @@ defmodule Mix.Tasks.LlmTrace do
     mix llm_trace DIA.LLM.FunctionRouter.route/4 --name=query_parser
     mix llm_trace MyApp.Auth.login/2 --name=auth --depth=3
     mix llm_trace "MyApp.Payments.process_payment/3" --runtime
+    mix llm_trace DIA.LLM.FunctionRouter.route/4 --name=query_parser --verbose
   """
 
   # Suppress warnings for Erlang modules that are loaded at runtime
@@ -23,7 +24,8 @@ defmodule Mix.Tasks.LlmTrace do
         depth: :integer,
         runtime: :boolean,
         output: :string,
-        include_tests: :boolean
+        include_tests: :boolean,
+        verbose: :boolean
       ]
     )
 
@@ -31,6 +33,10 @@ defmodule Mix.Tasks.LlmTrace do
     depth = opts[:depth] || 5
     use_runtime = opts[:runtime] || false
     include_tests = opts[:include_tests] || true
+    verbose = opts[:verbose] || false
+
+    # Store verbose flag globally for helper functions
+    Process.put(:llm_trace_verbose, verbose)
 
     Mix.shell().info("Tracing feature: #{feature_name}")
     Mix.shell().info("Starting from: #{target}")
@@ -57,6 +63,13 @@ defmodule Mix.Tasks.LlmTrace do
 
     Mix.shell().info("Generated feature '#{feature_name}' in #{output_path}")
     print_summary(dependencies, patterns)
+  end
+
+  # Helper function for conditional debug output
+  defp debug_info(message) do
+    if Process.get(:llm_trace_verbose, false) do
+      Mix.shell().info(message)
+    end
   end
 
   defp parse_mfa(target) do
@@ -129,20 +142,20 @@ defmodule Mix.Tasks.LlmTrace do
     # Try multiple approaches to get modules
     modules = case :application.get_key(app_name, :modules) do
       {:ok, modules} when is_list(modules) and length(modules) > 0 ->
-        Mix.shell().info("Found #{length(modules)} modules from application key")
+        debug_info("Found #{length(modules)} modules from application key")
         modules
       _ ->
-        Mix.shell().info("Application key method failed, scanning loaded modules...")
+        debug_info("Application key method failed, scanning loaded modules...")
         # Fallback: scan loaded modules
         loaded_modules = :code.all_loaded()
         |> Enum.map(fn {module, _} -> module end)
         |> Enum.filter(&is_app_module?/1)
 
-        Mix.shell().info("Found #{length(loaded_modules)} loaded app modules")
+        debug_info("Found #{length(loaded_modules)} loaded app modules")
 
         # If still empty, try a more aggressive approach
         if Enum.empty?(loaded_modules) do
-          Mix.shell().info("Loaded modules empty, trying to compile and get all modules...")
+          debug_info("Loaded modules empty, trying to compile and get all modules...")
 
           # Compile the project to ensure modules are loaded
           Mix.Task.run("compile")
@@ -156,14 +169,14 @@ defmodule Mix.Tasks.LlmTrace do
             String.starts_with?(module_str, "Elixir.#{app_name_str}")
           end)
 
-          Mix.shell().info("After compile: Found #{length(all_loaded)} app modules")
+          debug_info("After compile: Found #{length(all_loaded)} app modules")
           all_loaded
         else
           loaded_modules
         end
     end
 
-    Mix.shell().info("Final available modules: #{inspect(Enum.take(modules, 10))}...")
+    debug_info("Final available modules: #{inspect(Enum.take(modules, 10))}...")
     modules
   end
 
@@ -236,7 +249,7 @@ defmodule Mix.Tasks.LlmTrace do
     # Get all compiled modules in the current application
     all_modules = get_application_modules()
 
-    Mix.shell().info("Working with #{length(all_modules)} available modules")
+    debug_info("Working with #{length(all_modules)} available modules")
 
     # Start with the target module and trace its dependencies
     trace_module_dependencies(starting_module, all_modules, MapSet.new(), 3)
@@ -252,7 +265,7 @@ defmodule Mix.Tasks.LlmTrace do
       # Find modules that this module depends on
       dependencies = find_module_dependencies_from_source(module, all_modules)
 
-      Mix.shell().info("Module #{inspect(module)} depends on #{length(dependencies)} modules")
+      debug_info("Module #{inspect(module)} depends on #{length(dependencies)} modules")
 
       # Recursively trace dependencies
       Enum.reduce(dependencies, visited, fn dep_module, acc_visited ->
@@ -262,16 +275,16 @@ defmodule Mix.Tasks.LlmTrace do
   end
 
   defp find_module_dependencies_from_source(module, available_modules) do
-    Mix.shell().info("Searching for source of #{inspect(module)}")
+    debug_info("Searching for source of #{inspect(module)}")
 
     case find_module_source(module) do
       {:ok, source} ->
-        Mix.shell().info("Found source file, parsing dependencies...")
+        debug_info("Found source file, parsing dependencies...")
         dependencies = parse_dependencies_from_source(source, available_modules)
-        Mix.shell().info("Raw dependencies found: #{inspect(dependencies)}")
+        debug_info("Raw dependencies found: #{inspect(dependencies)}")
         dependencies
       {:error, reason} ->
-        Mix.shell().info("Could not read source for #{inspect(module)}: #{inspect(reason)}")
+        debug_info("Could not read source for #{inspect(module)}: #{inspect(reason)}")
         []
     end
   end
@@ -283,15 +296,15 @@ defmodule Mix.Tasks.LlmTrace do
       # Extract all module references from the AST
       dependencies = extract_module_references(ast, available_modules)
 
-      Mix.shell().info("All AST references found: #{inspect(dependencies)}")
-      Mix.shell().info("Available app modules: #{inspect(Enum.take(available_modules, 5))}...")
+      debug_info("All AST references found: #{inspect(dependencies)}")
+      debug_info("Available app modules: #{inspect(Enum.take(available_modules, 5))}...")
 
       # Filter to only modules that exist in our application
       filtered = Enum.filter(dependencies, fn dep ->
         Enum.member?(available_modules, dep)
       end)
 
-      Mix.shell().info("Filtered to app modules: #{inspect(filtered)}")
+      debug_info("Filtered to app modules: #{inspect(filtered)}")
       filtered
     rescue
       e ->
@@ -303,7 +316,7 @@ defmodule Mix.Tasks.LlmTrace do
   defp extract_module_references(ast, available_modules \\ []) do
     # First pass: collect all aliases
     aliases = collect_aliases(ast)
-    Mix.shell().info("Found aliases: #{inspect(aliases)}")
+    debug_info("Found aliases: #{inspect(aliases)}")
 
     # Second pass: extract module references with alias resolution
     dependencies = []
@@ -344,7 +357,7 @@ defmodule Mix.Tasks.LlmTrace do
         {{:., _, [module_atom, function_name]}, _, _args} when is_atom(module_atom) ->
           # Resolve the alias if it exists
           resolved_module = resolve_alias(module_atom, aliases)
-          Mix.shell().info("Found call: #{module_atom}.#{function_name}() -> resolved to #{inspect(resolved_module)}")
+          debug_info("Found call: #{module_atom}.#{function_name}() -> resolved to #{inspect(resolved_module)}")
           {node, [resolved_module | acc]}
 
         _ -> {node, acc}
@@ -353,17 +366,17 @@ defmodule Mix.Tasks.LlmTrace do
 
     # Clean up the dependencies - convert atoms to full module names if needed
     raw_deps = deps |> Enum.uniq()
-    Mix.shell().info("Raw dependencies before normalization: #{inspect(raw_deps)}")
+    debug_info("Raw dependencies before normalization: #{inspect(raw_deps)}")
 
     normalized = raw_deps
     |> Enum.map(fn dep ->
       normalized = normalize_module_name(dep, available_modules)
-      Mix.shell().info("Normalizing #{inspect(dep)} -> #{inspect(normalized)}")
+      debug_info("Normalizing #{inspect(dep)} -> #{inspect(normalized)}")
       normalized
     end)
     |> Enum.filter(&(&1 != nil))
 
-    Mix.shell().info("Final normalized dependencies: #{inspect(normalized)}")
+    debug_info("Final normalized dependencies: #{inspect(normalized)}")
     normalized
   end
 
@@ -439,8 +452,6 @@ defmodule Mix.Tasks.LlmTrace do
   end
 
   defp normalize_module_name(_, _), do: nil
-
-
 
   defp build_call_graph(xref, module, function, arity, depth, visited \\ MapSet.new()) do
     mfa = {module, function, arity}
@@ -547,15 +558,15 @@ defmodule Mix.Tasks.LlmTrace do
       String.replace(base_name, ".", "/") |> then(fn path -> "lib/#{path}.ex" end)
     ]
 
-    Mix.shell().info("Trying paths for #{inspect(module)}: #{inspect(possible_paths)}")
+    debug_info("Trying paths for #{inspect(module)}: #{inspect(possible_paths)}")
 
     Enum.find_value(possible_paths, fn path ->
-      Mix.shell().info("Checking: #{path}")
+      debug_info("Checking: #{path}")
       if File.exists?(path) do
-        Mix.shell().info("Found source at: #{path}")
+        debug_info("Found source at: #{path}")
         File.read(path)
       else
-        Mix.shell().info("Not found: #{path}")
+        debug_info("Not found: #{path}")
         nil
       end
     end) || {:error, :source_not_found}
@@ -571,14 +582,12 @@ defmodule Mix.Tasks.LlmTrace do
     end
   end
 
-
-
   defp is_app_module?(module) when is_atom(module) do
     app_name = Mix.Project.config()[:app] |> to_string() |> Macro.camelize()
     module_str = to_string(module)
 
     result = String.starts_with?(module_str, "Elixir.#{app_name}")
-    Mix.shell().info("Checking if #{module_str} is app module (#{app_name}): #{result}")
+    debug_info("Checking if #{module_str} is app module (#{app_name}): #{result}")
     result
   end
 
@@ -620,9 +629,9 @@ defmodule Mix.Tasks.LlmTrace do
     include_patterns = Enum.join(patterns, ",")
 
     %{
-      "include" => include_patterns,
-      "exclude" => "**/*_test.exs",  # Default exclusion
-      "description" => "Auto-generated from code tracing #{feature_name}"
+      include: include_patterns,
+      exclude: "**/*_test.exs",  # Default exclusion
+      description: "Auto-generated from code tracing #{feature_name}"
     }
   end
 

@@ -3,8 +3,8 @@
 
 %{
   "query_parser" => %{
-    "description" => "Auto-generated from code tracing query_parser",
-    "exclude" => "**/*_test.exs",
-    "include" => "lib/dia/agent/dynamic_supervisor.ex,lib/dia/agent.ex,lib/dia/agent/type_registry.ex,lib/dia/llm/function_router.ex,lib/dia/agent/reg_key.ex,test/dia/agent/dynamic_supervisor_test.exs,test/dia/agent_test.exs,test/dia/agent/type_registry_test.exs,test/dia/llm/function_router_test.exs,test/dia/agent/reg_key_test.exs"
+    exclude: "**/*_test.exs",
+    include: "lib/dia/agent/dynamic_supervisor.ex,lib/dia/agent.ex,lib/dia/agent/type_registry.ex,lib/dia/llm/function_router.ex,lib/dia/agent/reg_key.ex,test/dia/agent/dynamic_supervisor_test.exs,test/dia/agent_test.exs,test/dia/agent/type_registry_test.exs,test/dia/llm/function_router_test.exs,test/dia/agent/reg_key_test.exs",
+    description: "Auto-generated from code tracing query_parser"
   }
 }
