@@ -1,0 +1,685 @@
+defmodule Mix.Tasks.LlmTrace do
+  use Mix.Task
+
+  @shortdoc "Trace code dependencies to auto-generate LLM feature configurations"
+
+  @moduledoc """
+  Automatically discover feature boundaries by tracing function calls and dependencies.
+
+  Usage:
+    mix llm_trace DIA.LLM.FunctionRouter.route/4 --name=query_parser
+    mix llm_trace MyApp.Auth.login/2 --name=auth --depth=3
+    mix llm_trace "MyApp.Payments.process_payment/3" --runtime
+  """
+
+  # Suppress warnings for Erlang modules that are loaded at runtime
+  @compile {:no_warn_undefined, [:xref]}
+
+  @impl true
+  def run(args) do
+    {opts, [target], _} = OptionParser.parse(args,
+      switches: [
+        name: :string,
+        depth: :integer,
+        runtime: :boolean,
+        output: :string,
+        include_tests: :boolean
+      ]
+    )
+
+    feature_name = opts[:name] || infer_feature_name(target)
+    depth = opts[:depth] || 5
+    use_runtime = opts[:runtime] || false
+    include_tests = opts[:include_tests] || true
+
+    Mix.shell().info("Tracing feature: #{feature_name}")
+    Mix.shell().info("Starting from: #{target}")
+
+    # Parse the target MFA
+    {module, function, arity} = parse_mfa(target)
+
+    # Choose tracing strategy
+    dependencies = if use_runtime do
+      trace_runtime_dependencies(module, function, arity, depth)
+    else
+      trace_static_dependencies(module, function, arity, depth)
+    end
+
+    # Convert to file patterns
+    patterns = dependencies_to_patterns(dependencies, include_tests)
+
+    # Generate feature configuration
+    feature_config = generate_feature_config(feature_name, patterns)
+
+    # Output results
+    output_path = opts[:output] || "llm_features_traced.exs"
+    write_feature_config(output_path, feature_name, feature_config)
+
+    Mix.shell().info("Generated feature '#{feature_name}' in #{output_path}")
+    print_summary(dependencies, patterns)
+  end
+
+  defp parse_mfa(target) do
+    case Regex.run(~r/^(.+)\.([^.]+)\/(\d+)$/, target) do
+      [_, module_str, function_str, arity_str] ->
+        module = String.to_existing_atom("Elixir." <> module_str)
+        function = String.to_atom(function_str)
+        arity = String.to_integer(arity_str)
+        {module, function, arity}
+
+      _ ->
+        raise "Invalid MFA format. Use: Module.function/arity"
+    end
+  end
+
+  defp trace_static_dependencies(module, function, arity, depth) do
+    Mix.shell().info("Using static analysis...")
+
+    # Try Mix.Xref first (available in Mix), then fall back to :xref
+    case Code.ensure_loaded(Mix.Xref) do
+      {:module, Mix.Xref} ->
+        trace_with_mix_xref(module, function, arity, depth)
+
+      {:error, _} ->
+        case Code.ensure_loaded(:xref) do
+          {:module, :xref} ->
+            trace_with_xref(module, function, arity, depth)
+
+          {:error, _} ->
+            Mix.shell().error("Neither Mix.Xref nor :xref available, using simple analysis")
+            trace_with_simple_analysis(module, function, arity, depth)
+        end
+    end
+  end
+
+  defp trace_with_mix_xref(module, function, arity, depth) do
+    Mix.shell().info("Using Mix.Xref for analysis...")
+
+    # Use Mix's Xref functionality
+    try do
+      # This is a simplified approach - Mix.Xref is more complex
+      # For now, fall back to simple analysis but with better module discovery
+      discover_dependencies_via_compilation(module, function, arity, depth)
+    rescue
+      e ->
+        Mix.shell().error("Mix.Xref analysis failed: #{inspect(e)}")
+        trace_with_simple_analysis(module, function, arity, depth)
+    end
+  end
+
+  defp discover_dependencies_via_compilation(module, function, arity, _depth) do
+    # Alternative approach: use compilation metadata
+    _mfa = {module, function, arity}
+
+    # Get all modules in the current application
+    app_modules = get_application_modules()
+
+    # Find modules that might be related by analyzing their beam files
+    related_modules = Enum.filter(app_modules, fn mod ->
+      module_references_target?(mod, module)
+    end)
+
+    # Convert to MFA format for consistency
+    [{module, function, arity}] ++ Enum.map(related_modules, fn mod -> {mod, :__discovered__, 0} end)
+  end
+
+  defp get_application_modules do
+    app_name = Mix.Project.config()[:app]
+
+    # Try multiple approaches to get modules
+    modules = case :application.get_key(app_name, :modules) do
+      {:ok, modules} when is_list(modules) and length(modules) > 0 ->
+        Mix.shell().info("Found #{length(modules)} modules from application key")
+        modules
+      _ ->
+        Mix.shell().info("Application key method failed, scanning loaded modules...")
+        # Fallback: scan loaded modules
+        loaded_modules = :code.all_loaded()
+        |> Enum.map(fn {module, _} -> module end)
+        |> Enum.filter(&is_app_module?/1)
+
+        Mix.shell().info("Found #{length(loaded_modules)} loaded app modules")
+
+        # If still empty, try a more aggressive approach
+        if Enum.empty?(loaded_modules) do
+          Mix.shell().info("Loaded modules empty, trying to compile and get all modules...")
+
+          # Compile the project to ensure modules are loaded
+          Mix.Task.run("compile")
+
+          # Try again with all loaded modules
+          all_loaded = :code.all_loaded()
+          |> Enum.map(fn {module, _} -> module end)
+          |> Enum.filter(fn module ->
+            module_str = to_string(module)
+            app_name_str = app_name |> to_string() |> Macro.camelize()
+            String.starts_with?(module_str, "Elixir.#{app_name_str}")
+          end)
+
+          Mix.shell().info("After compile: Found #{length(all_loaded)} app modules")
+          all_loaded
+        else
+          loaded_modules
+        end
+    end
+
+    Mix.shell().info("Final available modules: #{inspect(Enum.take(modules, 10))}...")
+    modules
+  end
+
+  defp module_references_target?(module, target_module) do
+    # Check if module references the target module
+    try do
+      case :code.which(module) do
+        beam_path when is_list(beam_path) ->
+          # This is a simplified check - could be enhanced with beam file analysis
+          module_parts = module |> to_string() |> String.split(".")
+          target_parts = target_module |> to_string() |> String.split(".")
+
+          # Simple heuristic: shared namespace
+          Enum.zip(module_parts, target_parts)
+          |> Enum.take_while(fn {a, b} -> a == b end)
+          |> length() >= 2
+
+        _ -> false
+      end
+    rescue
+      _ -> false
+    end
+  end
+
+  defp trace_with_xref(module, function, arity, depth) do
+    # Start Xref analysis
+    case :xref.start([]) do
+      {:ok, xref} ->
+        try do
+          # Add current application
+          app_name = Mix.Project.config()[:app]
+          app_path = File.cwd!()
+
+          case :xref.add_application(xref, app_path, name: app_name) do
+            {:ok, _} ->
+              # Build call graph starting from our target
+              dependencies = build_call_graph(xref, module, function, arity, depth)
+
+              # Add module-level dependencies
+              module_deps = find_module_dependencies(dependencies)
+
+              dependencies ++ module_deps
+
+            {:error, _module, reason} ->
+              Mix.shell().error("Xref add_application failed: #{inspect(reason)}")
+              trace_with_simple_analysis(module, function, arity, depth)
+          end
+        after
+          :xref.stop(xref)
+        end
+
+      {:error, reason} ->
+        Mix.shell().error("Failed to start Xref: #{inspect(reason)}")
+        trace_with_simple_analysis(module, function, arity, depth)
+    end
+  end
+
+  defp trace_with_simple_analysis(module, function, arity, _depth) do
+    # Fallback: simple module discovery based on naming patterns
+    mfa = {module, function, arity}
+    base_modules = discover_related_modules(module)
+
+    Mix.shell().info("Found #{length(base_modules)} related modules using pattern matching")
+
+    # Convert modules to MFA tuples for consistency
+    Enum.map(base_modules, fn mod -> {mod, :__unknown__, 0} end) ++ [mfa]
+  end
+
+  defp discover_related_modules(starting_module) do
+    # Get all compiled modules in the current application
+    all_modules = get_application_modules()
+
+    Mix.shell().info("Working with #{length(all_modules)} available modules")
+
+    # Start with the target module and trace its dependencies
+    trace_module_dependencies(starting_module, all_modules, MapSet.new(), 3)
+    |> MapSet.to_list()
+  end
+
+  defp trace_module_dependencies(module, all_modules, visited, depth) do
+    if MapSet.member?(visited, module) or depth <= 0 do
+      visited
+    else
+      visited = MapSet.put(visited, module)
+
+      # Find modules that this module depends on
+      dependencies = find_module_dependencies_from_source(module, all_modules)
+
+      Mix.shell().info("Module #{inspect(module)} depends on #{length(dependencies)} modules")
+
+      # Recursively trace dependencies
+      Enum.reduce(dependencies, visited, fn dep_module, acc_visited ->
+        trace_module_dependencies(dep_module, all_modules, acc_visited, depth - 1)
+      end)
+    end
+  end
+
+  defp find_module_dependencies_from_source(module, available_modules) do
+    Mix.shell().info("Searching for source of #{inspect(module)}")
+
+    case find_module_source(module) do
+      {:ok, source} ->
+        Mix.shell().info("Found source file, parsing dependencies...")
+        dependencies = parse_dependencies_from_source(source, available_modules)
+        Mix.shell().info("Raw dependencies found: #{inspect(dependencies)}")
+        dependencies
+      {:error, reason} ->
+        Mix.shell().info("Could not read source for #{inspect(module)}: #{inspect(reason)}")
+        []
+    end
+  end
+
+  defp parse_dependencies_from_source(source, available_modules) do
+    try do
+      {:ok, ast} = Code.string_to_quoted(source)
+
+      # Extract all module references from the AST
+      dependencies = extract_module_references(ast, available_modules)
+
+      Mix.shell().info("All AST references found: #{inspect(dependencies)}")
+      Mix.shell().info("Available app modules: #{inspect(Enum.take(available_modules, 5))}...")
+
+      # Filter to only modules that exist in our application
+      filtered = Enum.filter(dependencies, fn dep ->
+        Enum.member?(available_modules, dep)
+      end)
+
+      Mix.shell().info("Filtered to app modules: #{inspect(filtered)}")
+      filtered
+    rescue
+      e ->
+        Mix.shell().error("Failed to parse source: #{inspect(e)}")
+        []
+    end
+  end
+
+  defp extract_module_references(ast, available_modules \\ []) do
+    # First pass: collect all aliases
+    aliases = collect_aliases(ast)
+    Mix.shell().info("Found aliases: #{inspect(aliases)}")
+
+    # Second pass: extract module references with alias resolution
+    dependencies = []
+
+    {_, deps} = Macro.prewalk(ast, dependencies, fn node, acc ->
+      case node do
+        # alias SomeModule (already collected above)
+        {:alias, _, [{:__aliases__, _, module_parts}]} ->
+          module = Module.concat(module_parts)
+          {node, [module | acc]}
+
+        # use SomeModule
+        {:use, _, [{:__aliases__, _, module_parts}]} ->
+          module = Module.concat(module_parts)
+          {node, [module | acc]}
+
+        # import SomeModule
+        {:import, _, [{:__aliases__, _, module_parts}]} ->
+          module = Module.concat(module_parts)
+          {node, [module | acc]}
+
+        # SomeModule.function_call()
+        {{:., _, [{:__aliases__, _, module_parts}, _function]}, _, _args} ->
+          module = Module.concat(module_parts)
+          {node, [module | acc]}
+
+        # Direct module atom references
+        {:__aliases__, _, module_parts} ->
+          module = Module.concat(module_parts)
+          {node, [module | acc]}
+
+        # Pattern match on structs: %SomeModule{}
+        {:%, _, [{:__aliases__, _, module_parts}, _fields]} ->
+          module = Module.concat(module_parts)
+          {node, [module | acc]}
+
+        # Handle Module.function calls where Module is an atom (could be aliased)
+        {{:., _, [module_atom, function_name]}, _, _args} when is_atom(module_atom) ->
+          # Resolve the alias if it exists
+          resolved_module = resolve_alias(module_atom, aliases)
+          Mix.shell().info("Found call: #{module_atom}.#{function_name}() -> resolved to #{inspect(resolved_module)}")
+          {node, [resolved_module | acc]}
+
+        _ -> {node, acc}
+      end
+    end)
+
+    # Clean up the dependencies - convert atoms to full module names if needed
+    raw_deps = deps |> Enum.uniq()
+    Mix.shell().info("Raw dependencies before normalization: #{inspect(raw_deps)}")
+
+    normalized = raw_deps
+    |> Enum.map(fn dep ->
+      normalized = normalize_module_name(dep, available_modules)
+      Mix.shell().info("Normalizing #{inspect(dep)} -> #{inspect(normalized)}")
+      normalized
+    end)
+    |> Enum.filter(&(&1 != nil))
+
+    Mix.shell().info("Final normalized dependencies: #{inspect(normalized)}")
+    normalized
+  end
+
+  defp collect_aliases(ast) do
+    aliases = %{}
+
+    {_, collected_aliases} = Macro.prewalk(ast, aliases, fn node, acc ->
+      case node do
+        # alias Full.Module.Name
+        {:alias, _, [{:__aliases__, _, module_parts}]} ->
+          full_module = Module.concat(module_parts)
+          alias_name = List.last(module_parts)
+          {node, Map.put(acc, alias_name, full_module)}
+
+        # alias Full.Module.Name, as: CustomName
+        {:alias, _, [{:__aliases__, _, module_parts}, [as: custom_name]]} when is_atom(custom_name) ->
+          full_module = Module.concat(module_parts)
+          {node, Map.put(acc, custom_name, full_module)}
+
+        _ -> {node, acc}
+      end
+    end)
+
+    collected_aliases
+  end
+
+  defp resolve_alias(module_atom, aliases) do
+    case Map.get(aliases, module_atom) do
+      nil -> module_atom  # No alias found, return as-is
+      full_module -> full_module  # Return the aliased module
+    end
+  end
+
+  defp normalize_module_name(module, available_modules)
+  defp normalize_module_name(module, available_modules) when is_atom(module) do
+    module_str = to_string(module)
+
+    cond do
+      # If it's already in our available modules list, return it directly
+      Enum.member?(available_modules, module) -> module
+
+      # Already a full Elixir module - check if it's in our app
+      String.starts_with?(module_str, "Elixir.") ->
+        if is_app_module?(module), do: module, else: nil
+
+      # Handle common Elixir modules
+      module_str in ~w(Agent GenServer Task Supervisor DynamicSupervisor Registry) ->
+        nil  # Skip standard library modules
+
+      # Try to resolve as a module in our app
+      true ->
+        app_name = Mix.Project.config()[:app] |> to_string() |> Macro.camelize()
+        try do
+          String.to_existing_atom("Elixir.#{app_name}.#{module_str}")
+        rescue
+          ArgumentError ->
+            # Also try with current app prefix variations
+            possible_names = [
+              "Elixir.#{app_name}.#{module_str}",
+              "Elixir.#{app_name}.Agent.#{module_str}",
+              "Elixir.#{app_name}.LLM.#{module_str}"
+            ]
+
+            Enum.find_value(possible_names, fn name ->
+              try do
+                String.to_existing_atom(name)
+              rescue
+                ArgumentError -> nil
+              end
+            end)
+        end
+    end
+  end
+
+  defp normalize_module_name(_, _), do: nil
+
+
+
+  defp build_call_graph(xref, module, function, arity, depth, visited \\ MapSet.new()) do
+    mfa = {module, function, arity}
+
+    if MapSet.member?(visited, mfa) or depth <= 0 do
+      []
+    else
+      visited = MapSet.put(visited, mfa)
+
+      # Get functions called by this MFA
+      case :xref.analyze(xref, {:call, mfa}) do
+        {:ok, calls} ->
+          direct_calls = Enum.map(calls, fn {_from, to} -> to end)
+
+          # Filter to only our application modules
+          app_calls = Enum.filter(direct_calls, &is_app_module?/1)
+
+          # Recursively trace calls
+          indirect_calls =
+            Enum.flat_map(app_calls, fn {mod, fun, ar} ->
+              build_call_graph(xref, mod, fun, ar, depth - 1, visited)
+            end)
+
+          [mfa | app_calls] ++ indirect_calls
+
+        {:error, :no_such_function} ->
+          Mix.shell().error("Function #{module}.#{function}/#{arity} not found in Xref database")
+          [mfa]
+
+        {:error, reason} ->
+          Mix.shell().error("Xref analysis failed for #{module}.#{function}/#{arity}: #{inspect(reason)}")
+          [mfa]
+      end
+    end
+  end
+
+  defp trace_runtime_dependencies(module, function, arity, depth) do
+    Mix.shell().info("Using runtime tracing (experimental)...")
+
+    # This would require running the actual function with tracing
+    # For now, fall back to static analysis
+    Mix.shell().error("Runtime tracing not yet implemented, using static analysis")
+    trace_static_dependencies(module, function, arity, depth)
+  end
+
+  defp find_module_dependencies(mfa_list) do
+    # Find modules used by our traced functions (schemas, structs, etc.)
+    modules = Enum.map(mfa_list, fn {mod, _fun, _arity} -> mod end) |> Enum.uniq()
+
+    Enum.flat_map(modules, fn module ->
+      # Check module source for `use`, `import`, `alias`, struct usage
+      case find_module_source(module) do
+        {:ok, source} -> parse_module_dependencies(source)
+        _ -> []
+      end
+    end)
+  end
+
+  defp find_module_source(module) do
+    # Try multiple strategies to find the source file
+    case find_source_by_beam_info(module) do
+      {:ok, source} -> {:ok, source}
+      {:error, _} -> find_source_by_convention(module)
+    end
+  end
+
+  defp find_source_by_beam_info(module) do
+    try do
+      case :code.which(module) do
+        beam_path when is_list(beam_path) ->
+          # Try to get source from beam file info
+          case :beam_lib.chunks(beam_path, [:compile_info]) do
+            {:ok, {_, [{:compile_info, compile_info}]}} ->
+              case Keyword.get(compile_info, :source) do
+                source_path when is_list(source_path) ->
+                  source_path_str = List.to_string(source_path)
+                  if File.exists?(source_path_str) do
+                    File.read(source_path_str)
+                  else
+                    {:error, :source_not_found}
+                  end
+                _ -> {:error, :no_source_info}
+              end
+            _ -> {:error, :no_compile_info}
+          end
+        _ -> {:error, :no_beam_file}
+      end
+    rescue
+      _ -> {:error, :beam_analysis_failed}
+    end
+  end
+
+  defp find_source_by_convention(module) do
+    # Fallback: try to find source file by naming convention
+    base_name = module
+    |> to_string()
+    |> String.replace("Elixir.", "")
+    |> Macro.underscore()
+
+    possible_paths = [
+      "lib/#{base_name}.ex",
+      "lib/#{base_name}.exs",
+      # Handle nested modules
+      String.replace(base_name, ".", "/") |> then(fn path -> "lib/#{path}.ex" end)
+    ]
+
+    Mix.shell().info("Trying paths for #{inspect(module)}: #{inspect(possible_paths)}")
+
+    Enum.find_value(possible_paths, fn path ->
+      Mix.shell().info("Checking: #{path}")
+      if File.exists?(path) do
+        Mix.shell().info("Found source at: #{path}")
+        File.read(path)
+      else
+        Mix.shell().info("Not found: #{path}")
+        nil
+      end
+    end) || {:error, :source_not_found}
+  end
+
+  defp parse_module_dependencies(source) do
+    # Parse AST to find dependencies using the alias-aware version
+    try do
+      {:ok, ast} = Code.string_to_quoted(source)
+      extract_module_references(ast)  # Use the alias-aware version
+    rescue
+      _ -> []
+    end
+  end
+
+
+
+  defp is_app_module?(module) when is_atom(module) do
+    app_name = Mix.Project.config()[:app] |> to_string() |> Macro.camelize()
+    module_str = to_string(module)
+
+    result = String.starts_with?(module_str, "Elixir.#{app_name}")
+    Mix.shell().info("Checking if #{module_str} is app module (#{app_name}): #{result}")
+    result
+  end
+
+  defp is_app_module?({module, _fun, _arity}), do: is_app_module?(module)
+
+  defp dependencies_to_patterns(dependencies, include_tests) do
+    # Convert list of MFAs and modules to file patterns
+    modules = dependencies
+    |> Enum.map(fn
+      {module, _fun, _arity} -> module
+      module when is_atom(module) -> module
+    end)
+    |> Enum.uniq()
+
+    # Convert modules to file patterns
+    patterns = Enum.map(modules, &module_to_file_pattern/1)
+
+    # Add test patterns if requested
+    test_patterns = if include_tests do
+      Enum.map(patterns, fn pattern ->
+        String.replace(pattern, "lib/", "test/") |> String.replace(".ex", "_test.exs")
+      end)
+    else
+      []
+    end
+
+    (patterns ++ test_patterns) |> Enum.uniq()
+  end
+
+  defp module_to_file_pattern(module) do
+    module
+    |> to_string()
+    |> String.replace("Elixir.", "")
+    |> Macro.underscore()
+    |> then(fn path -> "lib/#{path}.ex" end)
+  end
+
+  defp generate_feature_config(feature_name, patterns) do
+    include_patterns = Enum.join(patterns, ",")
+
+    %{
+      "include" => include_patterns,
+      "exclude" => "**/*_test.exs",  # Default exclusion
+      "description" => "Auto-generated from code tracing #{feature_name}"
+    }
+  end
+
+  defp write_feature_config(output_path, feature_name, config) do
+    # Read existing config or create new
+    existing_config = if File.exists?(output_path) do
+      {config, _} = Code.eval_file(output_path)
+      config
+    else
+      %{}
+    end
+
+    # Merge new feature
+    updated_config = Map.put(existing_config, feature_name, config)
+
+    # Write back to file
+    content = """
+    # Auto-generated LLM feature configuration
+    # Generated by: mix llm_trace
+
+    #{inspect(updated_config, pretty: true)}
+    """
+
+    File.write!(output_path, content)
+  end
+
+  defp print_summary(dependencies, patterns) do
+    Mix.shell().info("\n=== Trace Summary ===")
+    Mix.shell().info("Found #{length(dependencies)} function dependencies")
+    Mix.shell().info("Generated #{length(patterns)} file patterns")
+
+    Mix.shell().info("\nKey modules discovered:")
+    dependencies
+    |> Enum.map(fn
+      {module, _fun, _arity} -> module
+      module -> module
+    end)
+    |> Enum.uniq()
+    |> Enum.take(10)
+    |> Enum.each(fn module ->
+      Mix.shell().info("  - #{module}")
+    end)
+
+    Mix.shell().info("\nGenerated patterns:")
+    patterns
+    |> Enum.take(10)
+    |> Enum.each(fn pattern ->
+      Mix.shell().info("  - #{pattern}")
+    end)
+  end
+
+  defp infer_feature_name(target) do
+    target
+    |> String.split(".")
+    |> Enum.drop(1)  # Remove app name
+    |> Enum.take(1)  # Take first module part
+    |> List.first()
+    |> String.downcase()
+  end
+end
