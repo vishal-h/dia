@@ -1,0 +1,135 @@
+Absolutely! Here's a **Livebook** (`.livemd`) that demonstrates:
+
+* How to add and resolve agents using the new `DIA.Agent.RegKey` struct
+* How to dispatch calls with or without `login_session_id`
+* How to use `DIA.LLM.FunctionRouter` for tool-style routing
+
+---
+
+## ✅ Save As: `test_agent_sessions.livemd`
+
+````markdown
+# 🧪 DIA Agent Session Routing (Login Session + Chat Session)
+
+This Livebook demonstrates how to:
+- Use `DIA.Agent.RegKey` to resolve agents
+- Dispatch with and without `login_session_id`
+- Interact with agents using LLM-style routing
+
+---
+
+## ✅ Setup
+
+```elixir
+Mix.install([
+  {:jason, "~> 1.4"},
+  {:logger_file_backend, "~> 0.0.12"} # optional, for structured logs
+])
+````
+
+```elixir
+# Import helpers
+import Logger
+
+alias DIA.Agent
+alias DIA.Agent.TypeRegistry
+alias DIA.Agent.RegKey
+alias DIA.LLM.FunctionRouter
+alias DIA.LLM.FunctionExporter
+```
+
+---
+
+## 🔑 Define a sample reg\_key
+
+```elixir
+reg_key = %RegKey{
+  agent_type: DIA.Agent.WorkflowPlanner,
+  user_id: "u1",
+  chat_session_id: "chat_123",
+  login_session_id: "device_abc"
+}
+```
+
+---
+
+## ⚙️ Start or resolve the agent
+
+```elixir
+Agent.resolve_pid(
+  reg_key.agent_type,
+  reg_key.user_id,
+  reg_key.chat_session_id,
+  reg_key.login_session_id
+)
+```
+
+---
+
+## 💬 Dispatch with login\_session\_id
+
+```elixir
+Agent.dispatch_by_type(
+  :workflow_planner,
+  :plan,
+  [%{"goal" => "make coffee"}],
+  "u1",
+  "chat_123",
+  "device_abc"
+)
+```
+
+---
+
+## 💬 Dispatch without login\_session\_id
+
+```elixir
+Agent.dispatch_by_type(
+  :workflow_planner,
+  :plan,
+  [%{"goal" => "publish blog"}],
+  "u1",
+  "chat_456"
+)
+```
+
+---
+
+## 🧠 Simulate OpenAI Function Call
+
+```elixir
+FunctionRouter.route(
+  "workflow_planner:plan",
+  %{"goal" => "write a book"},
+  "u1",
+  "chat_789"
+)
+```
+
+---
+
+## 🧾 Export Available Functions for OpenAI Tools
+
+```elixir
+FunctionExporter.export_all()
+```
+
+---
+
+## 📦 Pretty JSON of OpenAI-compatible function specs
+
+```elixir
+IO.puts(FunctionExporter.to_json())
+```
+
+---
+
+## ✅ Summary
+
+This Livebook demonstrates:
+
+* Structured `reg_key` usage for multi-device agent scoping
+* Compatibility with OpenAI-style tool invocation
+* LLM-ready function routing and exports
+
+```
