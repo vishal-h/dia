@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 /_build
 /cover
 /deps
@@ -36,4 +35,3 @@ dia-*.tar
 
 # Temporary files, for example, from tests.
 /tmp/
->>>>>>> initial commit. add project structure and supervison tree. add basic agent and llm functionalities
