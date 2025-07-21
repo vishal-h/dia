@@ -77,6 +77,10 @@ iex> mix llm_trace DIA.LLM.FunctionExporter.export_all/0 --name=function_exporte
 
 iex> mix llm_trace DIA.LLM.FunctionExporter.to_json/0 --name=function_exporter_json --ai
 
+iex> mix llm_trace DIA.LLM.FunctionRouter.route/4 --runtime --name=runtime_test --verbose
+
+iex> mix llm_trace DIA.LLM.FunctionRouter.route/4 --ai --runtime --name=runtime_test --verbose
+
 iex> mix llm_ingest --feature=query_parser
 
 iex> mix llm_ingest --feature=function_exporter
