@@ -1,6 +1,8 @@
 defmodule Mix.Tasks.LlmIngest do
   use Mix.Task
 
+  @shortdoc "Generate LLM-optimized documentation from project files"
+
   @default_excludes [
     # Version control
     ".git/",
@@ -28,70 +30,205 @@ defmodule Mix.Tasks.LlmIngest do
         include: :string,
         output: :string,
         "no-gitignore": :boolean,
-        feature: :string
+        feature: :string,
+        help: :boolean
       ]
     )
 
-    root = Path.expand(List.first(args) || ".")
+    # Handle help option
+    if opts[:help] do
+      show_help()
+    else
+      root = Path.expand(List.first(args) || ".")
 
-    # Load feature configuration if specified
-    {feature_include, feature_exclude} = load_feature_config(opts[:feature], root)
+      # Load feature configuration if specified
+      {feature_include, feature_exclude} = load_feature_config(opts[:feature], root)
 
-    exclude_patterns = parse_patterns(opts[:exclude]) || []
-    include_patterns = parse_patterns(opts[:include]) || feature_include
+      exclude_patterns = parse_patterns(opts[:exclude]) || []
+      include_patterns = parse_patterns(opts[:include]) || feature_include
 
-    # Generate output filename based on feature
-    default_filename = case opts[:feature] do
-      nil -> "llm-ingest.md"
-      feature -> "llm-ingest-#{feature}.md"
+      # Generate output filename based on feature
+      default_filename = case opts[:feature] do
+        nil -> "llm-ingest.md"
+        feature -> "llm-ingest-#{feature}.md"
+      end
+
+      output_file = opts[:output] || default_filename
+
+      # Ensure doc directory exists and prepend it unless output already includes a path
+      output_file = case Path.dirname(output_file) do
+        "." -> Path.join("doc", output_file)
+        _ -> output_file
+      end
+
+      # Create doc directory if it doesn't exist
+      File.mkdir_p!(Path.dirname(output_file))
+
+      use_gitignore = !opts[:"no-gitignore"]
+
+      gitignore_patterns = if use_gitignore, do: read_gitignore_patterns(root), else: []
+      all_excludes = Enum.uniq(@default_excludes ++ exclude_patterns ++ feature_exclude ++ gitignore_patterns)
+
+      project_name = case Mix.Project.config()[:app] do
+        nil -> Path.basename(root)
+        app -> to_string(app)
+      end
+      description = Mix.Project.config()[:description] || "No description"
+
+      File.write!(output_file, "", [:raw])
+      write_section(output_file, "# #{project_name}\n#{description}")
+
+      # Add feature section if a feature was specified
+      if opts[:feature] do
+        feature_section = generate_feature_section(opts[:feature], feature_include, feature_exclude)
+        write_section(output_file, feature_section)
+      end
+
+      # Add notes section for LLM guidance
+      notes_section = generate_notes_section(opts[:feature], include_patterns)
+      if notes_section do
+        write_section(output_file, notes_section)
+      end
+
+      # Add folder structure section with markdown header
+      write_section(output_file, "## Project Structure\n\n```\n#{generate_folder_structure(root, all_excludes, include_patterns)}```")
+
+      # Add files section header
+      write_section(output_file, "## Files")
+
+      write_files_content(output_file, root, all_excludes, include_patterns)
+
+      Mix.shell().info("Generated #{output_file}")
     end
+  end
 
-    output_file = opts[:output] || default_filename
+  defp show_help do
+    Mix.shell().info("""
+    #{@shortdoc}
 
-    # Ensure doc directory exists and prepend it unless output already includes a path
-    output_file = case Path.dirname(output_file) do
-      "." -> Path.join("doc", output_file)
-      _ -> output_file
-    end
+    USAGE:
+        mix llm_ingest [PATH] [OPTIONS]
 
-    # Create doc directory if it doesn't exist
-    File.mkdir_p!(Path.dirname(output_file))
+    ARGUMENTS:
+        PATH                     Path to analyze (default: current directory)
 
-    use_gitignore = !opts[:"no-gitignore"]
+    OPTIONS:
+        --feature FEATURE        Use predefined feature configuration from llm_features.exs
+                                 Generated features can include AI-enhanced descriptions
 
-    gitignore_patterns = if use_gitignore, do: read_gitignore_patterns(root), else: []
-    all_excludes = Enum.uniq(@default_excludes ++ exclude_patterns ++ feature_exclude ++ gitignore_patterns)
+        --include PATTERNS       Comma-separated list of file patterns to include
+                                 Supports glob patterns like *.ex, lib/**/*.ex
 
-    project_name = case Mix.Project.config()[:app] do
-      nil -> Path.basename(root)
-      app -> to_string(app)
-    end
-    description = Mix.Project.config()[:description] || "No description"
+        --exclude PATTERNS       Comma-separated list of file patterns to exclude
+                                 (in addition to default excludes)
 
-    File.write!(output_file, "", [:raw])
-    write_section(output_file, "# #{project_name}\n#{description}")
+        --output FILE            Output file path (default: doc/llm-ingest.md)
+                                 Feature-specific: doc/llm-ingest-FEATURE.md
 
-    # Add feature section if a feature was specified
-    if opts[:feature] do
-      feature_section = generate_feature_section(opts[:feature], feature_include, feature_exclude)
-      write_section(output_file, feature_section)
-    end
+        --no-gitignore          Don't automatically exclude files from .gitignore
 
-    # Add notes section for LLM guidance
-    notes_section = generate_notes_section(opts[:feature], include_patterns)
-    if notes_section do
-      write_section(output_file, notes_section)
-    end
+        --help                   Show this help message
 
-    # Add folder structure section with markdown header
-    write_section(output_file, "## Project Structure\n\n```\n#{generate_folder_structure(root, all_excludes, include_patterns)}```")
+    EXAMPLES:
+        # Basic usage - analyze entire project
+        mix llm_ingest
 
-    # Add files section header
-    write_section(output_file, "## Files")
+        # Analyze specific directory
+        mix llm_ingest lib/my_feature
 
-    write_files_content(output_file, root, all_excludes, include_patterns)
+        # Use a traced feature configuration
+        mix llm_ingest --feature=auth
 
-    Mix.shell().info("Generated #{output_file}")
+        # Custom include patterns
+        mix llm_ingest --include="lib/auth/**,test/auth/**"
+
+        # Custom output location
+        mix llm_ingest --feature=api --output=docs/api-analysis.md
+
+        # Exclude additional patterns
+        mix llm_ingest --exclude="**/*_test.exs,priv/**"
+
+        # Include git-ignored files
+        mix llm_ingest --no-gitignore
+
+    FEATURE CONFIGURATIONS:
+        Features can be defined in:
+        - llm_features_traced.exs  (generated by mix llm_trace --ai)
+        - llm_features.exs         (manual configuration)
+        - llm_features_enhanced.exs
+
+        Example llm_features.exs:
+        %{
+          "auth" => %{
+            include: "lib/auth/**,test/auth/**",
+            exclude: "**/*_backup.ex",
+            description: "Authentication and authorization system"
+          },
+          "api" => %{
+            include: "lib/api/**,lib/schemas/**,test/api/**"
+          }
+        }
+
+    INCLUDE/EXCLUDE PATTERNS:
+        Supports standard glob patterns:
+        - *.ex                   All .ex files
+        - lib/**/*.ex           All .ex files under lib/ recursively
+        - lib/auth/*            Files directly under lib/auth/
+        - **/*_test.exs         All test files anywhere
+        - lib/{auth,api}/**     Files under lib/auth/ or lib/api/
+
+    DEFAULT EXCLUDES:
+        The following are excluded by default:
+        - Version control: .git/
+        - Build artifacts: _build/, deps/, node_modules/, *.beam
+        - Lock files: mix.lock, package-lock.json, yarn.lock
+        - System files: .DS_Store, Thumbs.db
+        - Editor files: *.swp, .idea/, .vscode/
+        - Generated docs: doc/llm-ingest*.md
+
+        Plus all patterns from .gitignore (unless --no-gitignore)
+
+    OUTPUT FORMAT:
+        Generates a structured Markdown file with:
+        1. Project name and description
+        2. Feature information (if using --feature)
+        3. AI analysis notes (for traced features)
+        4. Project structure tree
+        5. Full file contents with syntax highlighting
+
+        Optimized for LLM consumption with:
+        - Clear section separators
+        - Syntax-highlighted code blocks
+        - Contextual notes about Elixir/Phoenix patterns
+        - Feature-specific guidance for AI analysis
+
+    INTEGRATION WITH llm_trace:
+        1. Use llm_trace to discover feature boundaries:
+           mix llm_trace MyApp.Auth.login/2 --name=auth --ai
+
+        2. Use the traced feature for targeted analysis:
+           mix llm_ingest --feature=auth
+
+        This creates focused documentation for specific features with
+        AI-generated descriptions and recommendations.
+
+    FILE DISCOVERY:
+        - Follows Elixir naming conventions
+        - Handles nested module structures
+        - Includes test files by default
+        - Respects .gitignore patterns
+        - Supports custom glob patterns
+        - Provides detailed project structure
+
+    NOTES FOR LLM ANALYSIS:
+        Generated documentation includes contextual information about:
+        - Elixir module conventions and patterns
+        - Phoenix web framework structures
+        - GenServer, Supervisor, and OTP patterns
+        - Context boundaries and data flow
+        - Testing patterns with ExUnit
+        - Feature-specific architectural notes
+    """)
   end
 
   defp generate_feature_section(feature_name, feature_include, feature_exclude) do
