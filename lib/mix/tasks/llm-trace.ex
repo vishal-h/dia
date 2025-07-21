@@ -54,7 +54,7 @@ defmodule Mix.Tasks.LlmTrace do
     else
       target = case remaining_args do
         [target] -> target
-        _ -> 
+        _ ->
           Mix.shell().error("Error: Target function required. Use --help for usage information.")
           System.halt(1)
       end
@@ -115,6 +115,98 @@ defmodule Mix.Tasks.LlmTrace do
     if Process.get(:llm_trace_verbose, false) do
       Mix.shell().info(message)
     end
+  end
+
+  defp show_help do
+    Mix.shell().info("""
+    #{@shortdoc}
+
+    USAGE:
+        mix llm_trace <MODULE.FUNCTION/ARITY> [OPTIONS]
+
+    ARGUMENTS:
+        MODULE.FUNCTION/ARITY    Target function to trace (e.g., MyApp.Router.route/2)
+
+    OPTIONS:
+        --name NAME              Feature name for the generated configuration
+                                 (default: inferred from module name)
+
+        --depth N               Maximum depth for dependency tracing (default: 5)
+
+        --runtime               Use runtime tracing instead of static analysis
+                                (requires the application to be startable)
+
+        --output PATH           Output file path (default: llm_features_traced.exs)
+
+        --include-tests         Include test file patterns (default: true)
+                                Use --no-include-tests to disable
+
+        --verbose               Show detailed tracing information
+
+        --ai                    Enable AI-powered analysis for better feature descriptions
+                                (requires OPENAI_API_KEY environment variable)
+
+        --ai-model MODEL        OpenAI model to use for AI analysis (default: gpt-4o-mini)
+                                Options: gpt-4o, gpt-4o-mini, gpt-4-turbo
+
+        --ai-api-key KEY        OpenAI API key (alternative to OPENAI_API_KEY env var)
+
+        --help                  Show this help message
+
+    EXAMPLES:
+        # Basic usage with static analysis
+        mix llm_trace DIA.LLM.FunctionRouter.route/4 --name=query_parser
+
+        # Deep tracing with custom depth
+        mix llm_trace MyApp.Auth.login/2 --name=auth --depth=3 --verbose
+
+        # Runtime tracing (more accurate but requires running app)
+        mix llm_trace MyApp.Payments.process_payment/3 --runtime --name=payments
+
+        # AI-enhanced analysis
+        mix llm_trace DIA.LLM.FunctionRouter.route/4 --ai --name=smart_routing
+
+        # Custom output location
+        mix llm_trace MyApp.Core.main/1 --output=config/my_features.exs
+
+        # Exclude test files
+        mix llm_trace MyApp.Worker.perform/2 --no-include-tests
+
+    TRACING METHODS:
+        Static Analysis (default):
+        - Fast and safe
+        - Analyzes source code without running it
+        - May miss some runtime dependencies
+
+        Runtime Tracing (--runtime):
+        - More comprehensive dependency discovery
+        - Requires application to be startable
+        - Uses :dbg to trace actual function calls
+        - May timeout or fail if function can't be executed safely
+
+    AI FEATURES:
+        When --ai is enabled, the tool will:
+        - Suggest better feature names
+        - Generate comprehensive descriptions
+        - Analyze architectural complexity
+        - Identify common patterns (GenServer, Supervisor, etc.)
+        - Provide refactoring recommendations
+        - Suggest related modules that might be missing
+
+    REQUIREMENTS:
+        For AI features:
+        - OpenAI API key (set OPENAI_API_KEY environment variable)
+        - Add to mix.exs dependencies: {:req, "~> 0.4"}, {:jason, "~> 1.4"}
+
+    OUTPUT:
+        Generates or updates a feature configuration file with:
+        - Include/exclude patterns for files
+        - Feature metadata and descriptions
+        - AI analysis results (if enabled)
+
+    The generated configuration can be used with:
+        mix llm_ingest --feature=FEATURE_NAME
+    """)
   end
 
   defp parse_mfa(target) do
@@ -1261,9 +1353,5 @@ defmodule Mix.Tasks.LlmTrace do
     |> Enum.take(1)  # Take first module part
     |> List.first()
     |> String.downcase()
-  end
-
-  defp show_help do
-    Mix.shell().info(@moduledoc)
   end
 end
