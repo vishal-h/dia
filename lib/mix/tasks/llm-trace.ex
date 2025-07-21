@@ -33,7 +33,7 @@ defmodule Mix.Tasks.LlmTrace do
 
   @impl true
   def run(args) do
-    {opts, [target], _} = OptionParser.parse(args,
+    {opts, remaining_args, _} = OptionParser.parse(args,
       switches: [
         name: :string,
         depth: :integer,
@@ -43,58 +43,71 @@ defmodule Mix.Tasks.LlmTrace do
         verbose: :boolean,
         ai: :boolean,
         ai_model: :string,
-        ai_api_key: :string
+        ai_api_key: :string,
+        help: :boolean
       ]
     )
 
-    feature_name = opts[:name] || infer_feature_name(target)
-    depth = opts[:depth] || 5
-    use_runtime = opts[:runtime] || false
-    include_tests = opts[:include_tests] || true
-    verbose = opts[:verbose] || false
-    use_ai = opts[:ai] || false
-    ai_model = opts[:ai_model] || "gpt-4o-mini"
-    ai_api_key = opts[:ai_api_key] || System.get_env("OPENAI_API_KEY")
-
-    # Store options globally for helper functions
-    Process.put(:llm_trace_verbose, verbose)
-    Process.put(:llm_trace_ai_enabled, use_ai)
-    Process.put(:llm_trace_ai_model, ai_model)
-    Process.put(:llm_trace_ai_api_key, ai_api_key)
-
-    Mix.shell().info("Tracing feature: #{feature_name}")
-    Mix.shell().info("Starting from: #{target}")
-
-    # Parse the target MFA
-    {module, function, arity} = parse_mfa(target)
-
-    # Choose tracing strategy
-    dependencies = if use_runtime do
-      # Store original MFA for runtime processing
-      Process.put(:runtime_trace_module, module)
-      Process.put(:runtime_trace_function, function)
-      Process.put(:runtime_trace_arity, arity)
-      trace_runtime_dependencies(module, function, arity, depth)
+    # Handle help option
+    if opts[:help] do
+      show_help()
     else
-      trace_static_dependencies(module, function, arity, depth)
+      target = case remaining_args do
+        [target] -> target
+        _ -> 
+          Mix.shell().error("Error: Target function required. Use --help for usage information.")
+          System.halt(1)
+      end
+
+      feature_name = opts[:name] || infer_feature_name(target)
+      depth = opts[:depth] || 5
+      use_runtime = opts[:runtime] || false
+      include_tests = opts[:include_tests] || true
+      verbose = opts[:verbose] || false
+      use_ai = opts[:ai] || false
+      ai_model = opts[:ai_model] || "gpt-4o-mini"
+      ai_api_key = opts[:ai_api_key] || System.get_env("OPENAI_API_KEY")
+
+      # Store options globally for helper functions
+      Process.put(:llm_trace_verbose, verbose)
+      Process.put(:llm_trace_ai_enabled, use_ai)
+      Process.put(:llm_trace_ai_model, ai_model)
+      Process.put(:llm_trace_ai_api_key, ai_api_key)
+
+      Mix.shell().info("Tracing feature: #{feature_name}")
+      Mix.shell().info("Starting from: #{target}")
+
+      # Parse the target MFA
+      {module, function, arity} = parse_mfa(target)
+
+      # Choose tracing strategy
+      dependencies = if use_runtime do
+        # Store original MFA for runtime processing
+        Process.put(:runtime_trace_module, module)
+        Process.put(:runtime_trace_function, function)
+        Process.put(:runtime_trace_arity, arity)
+        trace_runtime_dependencies(module, function, arity, depth)
+      else
+        trace_static_dependencies(module, function, arity, depth)
+      end
+
+      # Convert to file patterns
+      patterns = dependencies_to_patterns(dependencies, include_tests)
+
+      # Generate feature configuration with optional AI enhancement
+      feature_config = if use_ai do
+        enhance_with_ai(feature_name, dependencies, patterns)
+      else
+        generate_feature_config(feature_name, patterns)
+      end
+
+      # Output results
+      output_path = opts[:output] || "llm_features_traced.exs"
+      write_feature_config(output_path, feature_name, feature_config)
+
+      Mix.shell().info("Generated feature '#{feature_name}' in #{output_path}")
+      print_summary(dependencies, patterns)
     end
-
-    # Convert to file patterns
-    patterns = dependencies_to_patterns(dependencies, include_tests)
-
-    # Generate feature configuration with optional AI enhancement
-    feature_config = if use_ai do
-      enhance_with_ai(feature_name, dependencies, patterns)
-    else
-      generate_feature_config(feature_name, patterns)
-    end
-
-    # Output results
-    output_path = opts[:output] || "llm_features_traced.exs"
-    write_feature_config(output_path, feature_name, feature_config)
-
-    Mix.shell().info("Generated feature '#{feature_name}' in #{output_path}")
-    print_summary(dependencies, patterns)
   end
 
   # Helper function for conditional debug output
@@ -1248,5 +1261,9 @@ defmodule Mix.Tasks.LlmTrace do
     |> Enum.take(1)  # Take first module part
     |> List.first()
     |> String.downcase()
+  end
+
+  defp show_help do
+    Mix.shell().info(@moduledoc)
   end
 end
