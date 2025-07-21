@@ -7,13 +7,13 @@ defmodule Mix.Tasks.LlmTrace do
   Automatically discover feature boundaries by tracing function calls and dependencies.
 
   Basic Usage:
-    mix llm_trace DIA.LLM.FunctionRouter.route/4 --name=query_parser
+    mix llm_trace MyApp.Router.route/4 --name=routing
     mix llm_trace MyApp.Auth.login/2 --name=auth --depth=3
-    mix llm_trace "MyApp.Payments.process_payment/3" --runtime
-    mix llm_trace DIA.LLM.FunctionRouter.route/4 --name=query_parser --verbose
+    mix llm_trace MyApp.Payments.process_payment/3 --runtime
+    mix llm_trace MyApp.Core.main/1 --name=core --verbose
 
   AI-Enhanced Usage:
-    mix llm_trace DIA.LLM.FunctionRouter.route/4 --name=query_parser --ai
+    mix llm_trace MyApp.Router.route/4 --name=routing --ai
     mix llm_trace MyApp.Feature.main/1 --ai --ai-model=gpt-4o --verbose
 
   AI Features:
@@ -25,7 +25,7 @@ defmodule Mix.Tasks.LlmTrace do
 
   Requirements for AI features:
     - Set OPENAI_API_KEY environment variable, or use --ai-api-key
-    - Req and Jason dependencies (add to mix.exs)
+    - Add to mix.exs: {:req, "~> 0.5"}, {:jason, "~> 1.4"}
   """
 
   # Suppress warnings for Erlang modules that are loaded at runtime
@@ -74,8 +74,22 @@ defmodule Mix.Tasks.LlmTrace do
       Process.put(:llm_trace_ai_model, ai_model)
       Process.put(:llm_trace_ai_api_key, ai_api_key)
 
+      # Validate AI dependencies early if AI is requested
+      if opts[:ai] do
+        case validate_ai_dependencies() do
+          :ok -> :ok
+          {:error, message} ->
+            Mix.shell().error("AI features unavailable: #{message}")
+            Mix.shell().info("Continuing with basic tracing (no AI features)...")
+            Process.put(:llm_trace_ai_enabled, false)
+        end
+      end
+
       Mix.shell().info("Tracing feature: #{feature_name}")
       Mix.shell().info("Starting from: #{target}")
+
+      # Debug module discovery if verbose
+      if verbose, do: debug_module_discovery()
 
       # Parse the target MFA
       {module, function, arity} = parse_mfa(target)
@@ -95,7 +109,7 @@ defmodule Mix.Tasks.LlmTrace do
       patterns = dependencies_to_patterns(dependencies, include_tests)
 
       # Generate feature configuration with optional AI enhancement
-      feature_config = if use_ai do
+      feature_config = if Process.get(:llm_trace_ai_enabled, false) do
         enhance_with_ai(feature_name, dependencies, patterns)
       else
         generate_feature_config(feature_name, patterns)
@@ -155,7 +169,7 @@ defmodule Mix.Tasks.LlmTrace do
 
     EXAMPLES:
         # Basic usage with static analysis
-        mix llm_trace DIA.LLM.FunctionRouter.route/4 --name=query_parser
+        mix llm_trace MyApp.Router.route/4 --name=routing
 
         # Deep tracing with custom depth
         mix llm_trace MyApp.Auth.login/2 --name=auth --depth=3 --verbose
@@ -164,7 +178,7 @@ defmodule Mix.Tasks.LlmTrace do
         mix llm_trace MyApp.Payments.process_payment/3 --runtime --name=payments
 
         # AI-enhanced analysis
-        mix llm_trace DIA.LLM.FunctionRouter.route/4 --ai --name=smart_routing
+        mix llm_trace MyApp.Router.route/4 --ai --name=smart_routing
 
         # Custom output location
         mix llm_trace MyApp.Core.main/1 --output=config/my_features.exs
@@ -194,9 +208,17 @@ defmodule Mix.Tasks.LlmTrace do
         - Suggest related modules that might be missing
 
     REQUIREMENTS:
-        For AI features:
-        - OpenAI API key (set OPENAI_API_KEY environment variable)
-        - Add to mix.exs dependencies: {:req, "~> 0.4"}, {:jason, "~> 1.4"}
+        For AI features, add to your mix.exs:
+          {:req, "~> 0.5"},      # Version 0.5+ recommended
+          {:jason, "~> 1.4"}     # JSON parsing
+
+        Then run: mix deps.get && mix compile
+
+        Set environment variable:
+          export OPENAI_API_KEY=your_key_here
+
+        Or pass directly:
+          mix llm_trace Module.func/1 --ai --ai-api-key=your_key
 
     OUTPUT:
         Generates or updates a feature configuration file with:
@@ -209,6 +231,23 @@ defmodule Mix.Tasks.LlmTrace do
     """)
   end
 
+  defp debug_module_discovery() do
+    Mix.shell().info("\n=== Module Discovery Debug ===")
+
+    # Show all application modules discovered
+    app_modules = get_application_modules()
+    Mix.shell().info("App modules found: #{length(app_modules)}")
+    app_modules
+    |> Enum.take(10)
+    |> Enum.each(fn module ->
+      file_pattern = module_to_file_pattern(module)
+      beam_path = :code.which(module)
+      Mix.shell().info("  #{module} -> #{file_pattern} (beam: #{inspect(beam_path)})")
+    end)
+
+    Mix.shell().info("=== End Module Discovery Debug ===\n")
+  end
+
   defp parse_mfa(target) do
     case Regex.run(~r/^(.+)\.([^.]+)\/(\d+)$/, target) do
       [_, module_str, function_str, arity_str] ->
@@ -219,6 +258,19 @@ defmodule Mix.Tasks.LlmTrace do
 
       _ ->
         raise "Invalid MFA format. Use: Module.function/arity"
+    end
+  end
+
+  defp validate_ai_dependencies() do
+    case {Code.ensure_loaded(Req), Code.ensure_loaded(Jason)} do
+      {{:module, Req}, {:module, Jason}} ->
+        :ok
+      {{:error, _}, {:module, Jason}} ->
+        {:error, "Missing Req dependency. Add to mix.exs: {:req, \"~> 0.5\"}"}
+      {{:module, Req}, {:error, _}} ->
+        {:error, "Missing Jason dependency. Add to mix.exs: {:jason, \"~> 1.4\"}"}
+      {{:error, _}, {:error, _}} ->
+        {:error, "Missing dependencies. Add to mix.exs: {:req, \"~> 0.5\"}, {:jason, \"~> 1.4\"}"}
     end
   end
 
@@ -566,25 +618,20 @@ defmodule Mix.Tasks.LlmTrace do
       # Try to resolve as a module in our app
       true ->
         app_name = Mix.Project.config()[:app] |> to_string() |> Macro.camelize()
-        try do
-          String.to_existing_atom("Elixir.#{app_name}.#{module_str}")
-        rescue
-          ArgumentError ->
-            # Also try with current app prefix variations
-            possible_names = [
-              "Elixir.#{app_name}.#{module_str}",
-              "Elixir.#{app_name}.Agent.#{module_str}",
-              "Elixir.#{app_name}.LLM.#{module_str}"
-            ]
 
-            Enum.find_value(possible_names, fn name ->
-              try do
-                String.to_existing_atom(name)
-              rescue
-                ArgumentError -> nil
-              end
-            end)
-        end
+        # Generic possible module patterns (removed project-specific ones)
+        possible_names = [
+          "Elixir.#{app_name}.#{module_str}",
+          # Add more generic patterns if needed, but avoid hard-coding specific namespaces
+        ]
+
+        Enum.find_value(possible_names, fn name ->
+          try do
+            String.to_existing_atom(name)
+          rescue
+            ArgumentError -> nil
+          end
+        end)
     end
   end
 
@@ -990,27 +1037,148 @@ defmodule Mix.Tasks.LlmTrace do
     end)
     |> Enum.uniq()
 
-    # Convert modules to file patterns
-    patterns = Enum.map(modules, &module_to_file_pattern/1)
+    debug_info("Converting #{length(modules)} modules to file patterns...")
+
+    # Convert modules to file patterns with better path discovery
+    patterns = modules
+    |> Enum.map(&module_to_file_pattern/1)
+    |> Enum.reject(&is_nil/1)
+
+    debug_info("Generated patterns: #{inspect(patterns)}")
 
     # Add test patterns if requested
     test_patterns = if include_tests do
-      Enum.map(patterns, fn pattern ->
-        String.replace(pattern, "lib/", "test/") |> String.replace(".ex", "_test.exs")
+      patterns
+      |> Enum.map(fn pattern ->
+        case pattern do
+          "lib/" <> rest ->
+            test_path = String.replace(rest, ".ex", "_test.exs")
+            "test/#{test_path}"
+          _ ->
+            # Fallback for non-standard paths
+            String.replace(pattern, ".ex", "_test.exs")
+            |> String.replace("lib/", "test/")
+        end
       end)
     else
       []
     end
 
-    (patterns ++ test_patterns) |> Enum.uniq()
+    all_patterns = (patterns ++ test_patterns) |> Enum.uniq()
+    debug_info("Final patterns including tests: #{inspect(all_patterns)}")
+    all_patterns
   end
 
+  # Improved module_to_file_pattern with better file discovery
   defp module_to_file_pattern(module) do
-    module
+    # First try to find the actual file by looking at the beam info
+    case find_actual_file_path(module) do
+      {:ok, actual_path} -> actual_path
+      {:error, _} ->
+        # Fallback to the basic underscore conversion
+        module
+        |> to_string()
+        |> String.replace("Elixir.", "")
+        |> Macro.underscore()
+        |> then(fn path -> "lib/#{path}.ex" end)
+    end
+  end
+
+  # Add this new function to find the actual file path
+  defp find_actual_file_path(module) do
+    try do
+      case :code.which(module) do
+        beam_path when is_list(beam_path) ->
+          # Try to get source path from beam info
+          case :beam_lib.chunks(beam_path, [:compile_info]) do
+            {:ok, {_, [{:compile_info, compile_info}]}} ->
+              case Keyword.get(compile_info, :source) do
+                source_path when is_list(source_path) ->
+                  source_path_str = List.to_string(source_path)
+                  relative_path = Path.relative_to_cwd(source_path_str)
+                  if String.starts_with?(relative_path, "lib/") and String.ends_with?(relative_path, ".ex") do
+                    {:ok, relative_path}
+                  else
+                    {:error, :not_in_lib}
+                  end
+                _ -> {:error, :no_source_info}
+              end
+            _ -> {:error, :no_compile_info}
+          end
+        _ ->
+          # Try to find by convention with directory search
+          find_file_by_searching(module)
+      end
+    rescue
+      _ -> {:error, :beam_analysis_failed}
+    end
+  end
+
+  # Add this function to search for files when beam info doesn't work
+  defp find_file_by_searching(module) do
+    # Convert module to possible patterns
+    module_str = module
     |> to_string()
     |> String.replace("Elixir.", "")
-    |> Macro.underscore()
-    |> then(fn path -> "lib/#{path}.ex" end)
+
+    # Handle both the module name and nested possibilities
+    possible_patterns = generate_possible_file_patterns(module_str)
+
+    debug_info("Searching for #{module_str} with patterns: #{inspect(possible_patterns)}")
+
+    # Find the first matching file
+    case Enum.find_value(possible_patterns, &find_matching_file/1) do
+      nil -> {:error, :not_found}
+      path -> {:ok, path}
+    end
+  end
+
+  defp generate_possible_file_patterns(module_str) do
+    base_name = Macro.underscore(module_str)
+
+    # Generate multiple possible patterns based on common conventions
+    patterns = [
+      # Direct pattern: InstWorker -> lib/inst_worker.ex
+      "lib/#{base_name}.ex",
+
+      # Nested patterns: look for the file in subdirectories
+      "lib/**/#{Path.basename(base_name)}.ex",
+
+      # Handle cases where the module might be nested differently
+      # e.g., MyApp.Auth.User -> lib/my_app/auth/user.ex vs lib/auth/user.ex
+      case String.contains?(module_str, ".") do
+        true ->
+          parts = String.split(module_str, ".")
+          # Try both full path and without the app name
+          app_name = Mix.Project.config()[:app] |> to_string() |> Macro.camelize()
+
+          case parts do
+            [^app_name | rest] when rest != [] ->
+              # Remove app name prefix: MyApp.Auth.User -> auth/user
+              rest_path = rest |> Enum.join(".") |> Macro.underscore()
+              ["lib/#{rest_path}.ex", "lib/**/#{Path.basename(rest_path)}.ex"]
+            _ ->
+              # Keep as is
+              full_path = Macro.underscore(module_str)
+              ["lib/#{full_path}.ex"]
+          end
+        false ->
+          []
+      end
+    ]
+
+    patterns |> List.flatten() |> Enum.uniq()
+  end
+
+  defp find_matching_file(pattern) do
+    case Path.wildcard(pattern) do
+      [first_match | _] ->
+        debug_info("Found match for pattern #{pattern}: #{first_match}")
+        first_match
+      [] ->
+        debug_info("No matches for pattern: #{pattern}")
+        nil
+    end
   end
 
   defp generate_feature_config(feature_name, patterns) do
@@ -1051,8 +1219,22 @@ defmodule Mix.Tasks.LlmTrace do
   end
 
   defp ai_enabled?() do
-    Process.get(:llm_trace_ai_enabled, false) &&
-    Process.get(:llm_trace_ai_api_key) != nil
+    has_ai_flag = Process.get(:llm_trace_ai_enabled, false)
+    has_api_key = Process.get(:llm_trace_ai_api_key) != nil
+
+    case {has_ai_flag, has_api_key} do
+      {true, true} ->
+        case validate_ai_dependencies() do
+          :ok -> true
+          {:error, message} ->
+            Mix.shell().error("AI features unavailable: #{message}")
+            false
+        end
+      {true, false} ->
+        Mix.shell().error("AI features enabled but no API key found. Set OPENAI_API_KEY or use --ai-api-key")
+        false
+      _ -> false
+    end
   end
 
   defp analyze_feature_with_ai(feature_name, discovered_modules, patterns) do
@@ -1097,7 +1279,6 @@ defmodule Mix.Tasks.LlmTrace do
       String.contains?(module_name, "Agent") -> "Lightweight state management"
       String.contains?(module_name, "Registry") -> "Process registration and lookup"
       String.contains?(module_name, "Auth") -> "Authentication/authorization"
-      String.contains?(module_name, "LLM") -> "Large Language Model integration"
       String.contains?(module_name, "Query") -> "Query processing/parsing"
       String.contains?(module_name, "Parser") -> "Data parsing/transformation"
       String.contains?(module_name, "Worker") -> "Background job processing"
@@ -1219,11 +1400,21 @@ defmodule Mix.Tasks.LlmTrace do
       {:ok, %Req.Response{status: status, body: error_body}} ->
         {:error, "API request failed with status #{status}: #{inspect(error_body)}"}
 
-      {:error, %Req.TransportError{reason: reason}} ->
-        {:error, "Request failed: #{inspect(reason)}"}
+      # Handle different error types based on Req version
+      {:error, error} ->
+        case error do
+          # Modern Req (0.4+) with TransportError struct
+          %{__struct__: struct_name, reason: reason} when struct_name in [Req.TransportError] ->
+            {:error, "Request failed: #{inspect(reason)}"}
 
-      {:error, exception} ->
-        {:error, "Request exception: #{inspect(exception)}"}
+          # Legacy Req or other error formats
+          %{reason: reason} ->
+            {:error, "Request failed: #{inspect(reason)}"}
+
+          # Fallback for any other error format
+          other ->
+            {:error, "Request exception: #{inspect(other)}"}
+        end
     end
   end
 

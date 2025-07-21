@@ -18,13 +18,7 @@
   "function_exporter_json" => %{
     exclude: "**/*_test.exs",
     include: "lib/dia/agent/query_parser.ex,lib/dia/agent/type_registry.ex,lib/dia/llm/function_exporter.ex,test/dia/agent/query_parser_test.exs,test/dia/agent/type_registry_test.exs,test/dia/llm/function_exporter_test.exs",
-    description: "The FunctionExporterForLLM feature facilitates the integration of Large Language Models (LLMs) with a focus on exporting functions that can be invoked by the LLM. It manages lightweight state through the QueryParser and TypeRegistry modules, which handle the parsing of queries and the registration of types, respectively. This allows for dynamic interaction with the LLM, enabling it to execute functions based on user input or predefined queries.",
-    related_modules: ["DIA.Agent.FunctionInvoker", "DIA.LLM.QueryExecutor"],
-    complexity: "medium",
-    patterns: ["GenServer", "State Management", "Context"],
-    recommendations: ["Consider implementing a Supervisor to manage the lifecycle of the QueryParser and TypeRegistry modules for better fault tolerance.",
-     "Enhance documentation for each module to clarify their responsibilities and interactions, which will aid in maintainability and onboarding new developers."],
-    suggested_name: "FunctionExporterForLLM"
+    description: "Auto-generated from code tracing function_exporter_json"
   },
   "query_parser" => %{
     exclude: "**/*_test.exs",
