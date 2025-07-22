@@ -38,6 +38,10 @@ defmodule Mix.Tasks.LlmWorkflow do
           labels: :string,
           # enable AI analysis
           ai: :boolean,
+          ai_model: :string,
+          ai_api_key: :string,
+          ai_provider: :string,
+          ai_base_url: :string,
           # don't actually create tickets
           dry_run: :boolean,
           # analyze all features and create roadmap
@@ -479,36 +483,37 @@ defmodule Mix.Tasks.LlmWorkflow do
   end
 
   defp make_real_ai_request(prompt) do
-    api_key = System.get_env("OPENAI_API_KEY")
-    # You can make this configurable
-    model = "gpt-4o-mini"
+    case get_ai_client() do
+      {:ok, :openai} -> make_openai_request(prompt)
+      {:ok, :claude} -> make_claude_request(prompt)
+      {:ok, {:ollama, base_url}} -> make_ollama_request(prompt, base_url)
+      {:ok, {:vllm, base_url, api_key}} -> make_vllm_request(prompt, base_url, api_key)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp make_openai_request(prompt) do
+    api_key = System.get_env("OPENAI_API_KEY") || Process.get(:workflow_opts, %{})[:ai_api_key]
+    model = Process.get(:workflow_opts, %{})[:ai_model] || "gpt-4o-mini"
 
     request_body = %{
       model: model,
       messages: [
         %{
           role: "system",
-          content:
-            "You are an expert software architect analyzing Elixir codebases. Provide practical, actionable analysis based on the actual code provided."
+          content: "You are an expert software architect analyzing Elixir codebases."
         },
-        %{
-          role: "user",
-          content: prompt
-        }
+        %{role: "user", content: prompt}
       ],
       temperature: 0.3,
       max_tokens: 1500
     }
 
-    debug_info("🤖 Calling OpenAI API for real analysis...")
+    debug_info("🤖 Calling OpenAI API...")
 
-    # Ensure Finch is started
     case ensure_finch_started() do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        {:error, "Failed to start HTTP client: #{reason}"}
+      :ok -> :ok
+      {:error, reason} -> {:error, "Failed to start HTTP client: #{reason}"}
     end
 
     case Req.post("https://api.openai.com/v1/chat/completions",
@@ -525,12 +530,140 @@ defmodule Mix.Tasks.LlmWorkflow do
         parse_ai_analysis_response(content)
 
       {:ok, %Req.Response{status: status, body: error_body}} ->
-        Mix.shell().error("OpenAI API error #{status}: #{inspect(error_body)}")
-        {:error, "API request failed"}
+        {:error, "OpenAI API error #{status}: #{inspect(error_body)}"}
 
       {:error, error} ->
-        Mix.shell().error("Request failed: #{inspect(error)}")
-        {:error, "Request failed"}
+        {:error, "Request failed: #{inspect(error)}"}
+    end
+  end
+
+  defp make_claude_request(prompt) do
+    api_key = System.get_env("ANTHROPIC_API_KEY") || Process.get(:workflow_opts, %{})[:ai_api_key]
+    model = Process.get(:workflow_opts, %{})[:ai_model] || "claude-3-5-sonnet-20241022"
+
+    request_body = %{
+      model: model,
+      max_tokens: 1500,
+      temperature: 0.3,
+      system:
+        "You are an expert software architect analyzing Elixir codebases. Provide practical, actionable analysis based on the actual code provided.",
+      messages: [
+        %{role: "user", content: prompt}
+      ]
+    }
+
+    debug_info("🤖 Calling Claude API...")
+
+    case ensure_finch_started() do
+      :ok -> :ok
+      {:error, reason} -> {:error, "Failed to start HTTP client: #{reason}"}
+    end
+
+    case Req.post("https://api.anthropic.com/v1/messages",
+           headers: [
+             authorization: "Bearer #{api_key}",
+             "anthropic-version": "2023-06-01"
+           ],
+           json: request_body,
+           receive_timeout: 30_000,
+           finch: LlmWorkflow.Finch
+         ) do
+      {:ok, %Req.Response{status: 200, body: %{"content" => [%{"text" => content} | _]}}} ->
+        parse_ai_analysis_response(content)
+
+      {:ok, %Req.Response{status: status, body: error_body}} ->
+        {:error, "Claude API error #{status}: #{inspect(error_body)}"}
+
+      {:error, error} ->
+        {:error, "Request failed: #{inspect(error)}"}
+    end
+  end
+
+  defp make_ollama_request(prompt, base_url) do
+    model = Process.get(:workflow_opts, %{})[:ai_model] || "llama3.1:8b"
+
+    request_body = %{
+      model: model,
+      prompt: "You are an expert software architect analyzing Elixir codebases.\n\n#{prompt}",
+      stream: false,
+      options: %{
+        temperature: 0.3,
+        num_predict: 1500
+      }
+    }
+
+    debug_info("🤖 Calling Ollama API at #{base_url}...")
+
+    case ensure_finch_started() do
+      :ok -> :ok
+      {:error, reason} -> {:error, "Failed to start HTTP client: #{reason}"}
+    end
+
+    case Req.post("#{base_url}/api/generate",
+           json: request_body,
+           # Ollama can be slower
+           receive_timeout: 60_000,
+           finch: LlmWorkflow.Finch
+         ) do
+      {:ok, %Req.Response{status: 200, body: %{"response" => content}}} ->
+        parse_ai_analysis_response(content)
+
+      {:ok, %Req.Response{status: status, body: error_body}} ->
+        {:error, "Ollama API error #{status}: #{inspect(error_body)}"}
+
+      {:error, error} ->
+        {:error, "Request failed: #{inspect(error)}"}
+    end
+  end
+
+  defp make_vllm_request(prompt, base_url, api_key) do
+    model = Process.get(:workflow_opts, %{})[:ai_model] || "microsoft/DialoGPT-large"
+
+    request_body = %{
+      model: model,
+      messages: [
+        %{
+          role: "system",
+          content: "You are an expert software architect analyzing Elixir codebases."
+        },
+        %{role: "user", content: prompt}
+      ],
+      temperature: 0.3,
+      max_tokens: 1500
+    }
+
+    debug_info("🤖 Calling vLLM API at #{base_url}...")
+
+    case ensure_finch_started() do
+      :ok -> :ok
+      {:error, reason} -> {:error, "Failed to start HTTP client: #{reason}"}
+    end
+
+    headers =
+      if api_key do
+        [authorization: "Bearer #{api_key}"]
+      else
+        []
+      end
+
+    case Req.post("#{base_url}/v1/chat/completions",
+           headers: headers,
+           json: request_body,
+           receive_timeout: 30_000,
+           finch: LlmWorkflow.Finch
+         ) do
+      {:ok,
+       %Req.Response{
+         status: 200,
+         body: %{"choices" => [%{"message" => %{"content" => content}} | _]}
+       }} ->
+        parse_ai_analysis_response(content)
+
+      {:ok, %Req.Response{status: status, body: error_body}} ->
+        {:error, "vLLM API error #{status}: #{inspect(error_body)}"}
+
+      {:error, error} ->
+        {:error, "Request failed: #{inspect(error)}"}
     end
   end
 
@@ -597,7 +730,29 @@ defmodule Mix.Tasks.LlmWorkflow do
   end
 
   defp get_ai_client() do
-    api_key = System.get_env("OPENAI_API_KEY")
+    provider =
+      System.get_env("LLM_PROVIDER") || Process.get(:workflow_opts, %{})[:ai_provider] || "openai"
+
+    case provider do
+      "openai" ->
+        get_openai_client()
+
+      "claude" ->
+        get_claude_client()
+
+      "ollama" ->
+        get_ollama_client()
+
+      "vllm" ->
+        get_vllm_client()
+
+      _ ->
+        {:error, "Unsupported LLM provider: #{provider}. Supported: openai, claude, ollama, vllm"}
+    end
+  end
+
+  defp get_openai_client() do
+    api_key = System.get_env("OPENAI_API_KEY") || Process.get(:workflow_opts, %{})[:ai_api_key]
 
     case {Code.ensure_loaded(Req), Code.ensure_loaded(Jason), api_key} do
       {{:module, Req}, {:module, Jason}, key} when is_binary(key) ->
@@ -614,6 +769,64 @@ defmodule Mix.Tasks.LlmWorkflow do
 
       _ ->
         {:error, "Missing dependencies or API key"}
+    end
+  end
+
+  defp get_claude_client() do
+    api_key = System.get_env("ANTHROPIC_API_KEY") || Process.get(:workflow_opts, %{})[:ai_api_key]
+
+    case {Code.ensure_loaded(Req), Code.ensure_loaded(Jason), api_key} do
+      {{:module, Req}, {:module, Jason}, key} when is_binary(key) ->
+        {:ok, :claude}
+
+      {{:error, _}, _, _} ->
+        {:error, "Missing Req dependency. Add {:req, \"~> 0.5\"} to mix.exs"}
+
+      {_, {:error, _}, _} ->
+        {:error, "Missing Jason dependency. Add {:jason, \"~> 1.4\"} to mix.exs"}
+
+      {_, _, nil} ->
+        {:error, "Missing ANTHROPIC_API_KEY environment variable"}
+
+      _ ->
+        {:error, "Missing dependencies or API key"}
+    end
+  end
+
+  defp get_ollama_client() do
+    base_url =
+      System.get_env("OLLAMA_BASE_URL") || Process.get(:workflow_opts, %{})[:ai_base_url] ||
+        "http://localhost:11434"
+
+    case {Code.ensure_loaded(Req), Code.ensure_loaded(Jason)} do
+      {{:module, Req}, {:module, Jason}} ->
+        {:ok, {:ollama, base_url}}
+
+      {{:error, _}, _} ->
+        {:error, "Missing Req dependency. Add {:req, \"~> 0.5\"} to mix.exs"}
+
+      {_, {:error, _}} ->
+        {:error, "Missing Jason dependency. Add {:jason, \"~> 1.4\"} to mix.exs"}
+    end
+  end
+
+  defp get_vllm_client() do
+    base_url = System.get_env("VLLM_BASE_URL") || Process.get(:workflow_opts, %{})[:ai_base_url]
+    api_key = System.get_env("VLLM_API_KEY") || Process.get(:workflow_opts, %{})[:ai_api_key]
+
+    if !base_url do
+      {:error, "Missing VLLM_BASE_URL environment variable"}
+    else
+      case {Code.ensure_loaded(Req), Code.ensure_loaded(Jason)} do
+        {{:module, Req}, {:module, Jason}} ->
+          {:ok, {:vllm, base_url, api_key}}
+
+        {{:error, _}, _} ->
+          {:error, "Missing Req dependency. Add {:req, \"~> 0.5\"} to mix.exs"}
+
+        {_, {:error, _}} ->
+          {:error, "Missing Jason dependency. Add {:jason, \"~> 1.4\"} to mix.exs"}
+      end
     end
   end
 
@@ -902,18 +1115,22 @@ defmodule Mix.Tasks.LlmWorkflow do
         mix llm_workflow --analyze-all [OPTIONS]
 
     OPTIONS:
-        --feature FEATURE        Analyze specific feature (from llm_features.exs)
-        --type TYPE              Analysis type: enhancement|bug|refactor|documentation
-        --title TITLE            Custom ticket title
-        --assign USER            Assign to @github-copilot, @username, or team
-        --repo OWNER/REPO        GitHub repository (auto-detected from git remote)
-        --priority LEVEL         Priority: low|medium|high|critical
-        --labels LABELS          Comma-separated additional labels
-        --ai                     Enable AI-powered analysis (requires OPENAI_API_KEY)
-        --no-dry-run            Create real tickets (default is dry-run for safety)
-        --analyze-all           Analyze all features and create roadmap
-        --verbose               Show detailed output
-        --help                  Show this help
+      --feature FEATURE        Analyze specific feature (from llm_features.exs)
+      --type TYPE              Analysis type: enhancement|bug|refactor|documentation
+      --title TITLE            Custom ticket title
+      --assign USER            Assign to @github-copilot, @username, or team
+      --repo OWNER/REPO        GitHub repository (auto-detected from git remote)
+      --priority LEVEL         Priority: low|medium|high|critical
+      --labels LABELS          Comma-separated additional labels
+      --ai                     Enable AI-powered analysis
+      --ai-provider PROVIDER   LLM provider: openai|claude|ollama|vllm (default: openai)
+      --ai-model MODEL         Model name (provider-specific)
+      --ai-api-key KEY         API key for the LLM provider
+      --ai-base-url URL        Base URL for self-hosted LLMs (ollama/vllm)
+      --no-dry-run            Create real tickets (default is dry-run for safety)
+      --analyze-all           Analyze all features and create roadmap
+      --verbose               Show detailed output
+      --help                  Show this help
 
     EXAMPLES:
         # Basic analysis (dry-run, no AI)
@@ -933,6 +1150,21 @@ defmodule Mix.Tasks.LlmWorkflow do
 
         # Analyze all features (dry-run)
         mix llm_workflow --analyze-all --ai
+
+        # OpenAI (default)
+        mix llm_workflow --feature=auth --type=enhancement --ai
+
+        # Claude
+        mix llm_workflow --feature=auth --type=enhancement --ai \\
+          --ai-provider=claude --ai-model=claude-3-5-sonnet-20241022
+
+        # Local Ollama
+        mix llm_workflow --feature=auth --type=enhancement --ai \\
+          --ai-provider=ollama --ai-model=llama3.1:8b
+
+        # Self-hosted vLLM
+        mix llm_workflow --feature=auth --type=enhancement --ai \\
+          --ai-provider=vllm --ai-base-url=http://gpu-server:8000
 
     CUSTOM BUG CREATION:
         Create specific bugs with AI-generated context based on your code:
@@ -959,6 +1191,31 @@ defmodule Mix.Tasks.LlmWorkflow do
         - Acceptance criteria with actionable steps
         - Risk assessment and mitigation strategies
         - Effort estimates and affected files from your codebase
+
+    LLM PROVIDERS:
+        OpenAI:
+          --ai-provider=openai --ai-model=gpt-4o-mini
+          Requires: OPENAI_API_KEY environment variable
+
+        Claude (Anthropic):
+          --ai-provider=claude --ai-model=claude-3-5-sonnet-20241022
+          Requires: ANTHROPIC_API_KEY environment variable
+
+        Ollama (Local):
+          --ai-provider=ollama --ai-model=llama3.1:8b --ai-base-url=http://localhost:11434
+          Requires: Ollama running locally or OLLAMA_BASE_URL
+
+        vLLM (Self-hosted):
+          --ai-provider=vllm --ai-base-url=http://your-vllm-server:8000
+          Optional: VLLM_API_KEY for authenticated endpoints
+
+    ENVIRONMENT VARIABLES:
+        LLM_PROVIDER=openai|claude|ollama|vllm
+        OPENAI_API_KEY=your_openai_key
+        ANTHROPIC_API_KEY=your_claude_key
+        OLLAMA_BASE_URL=http://localhost:11434
+        VLLM_BASE_URL=http://your-server:8000
+        VLLM_API_KEY=your_vllm_key (optional)
 
     WORKFLOW:
         1. 📝 Generate feature context using llm_ingest
