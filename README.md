@@ -89,6 +89,9 @@ iex> mix llm_ingest --feature=function_exporter_json
 
 iex> mix llm_workflow --feature=query_parser --type=bug --ai --ai-provider=openrouter --ai-model=qwen/qwen3-235b-a22b-07-25:free  --no-dry-run
 
+iex> mix llm_context_compress --help
+
+iex> mix llm_context_compress --input doc/llm-ingest-mix_task.md --output doc/llm-ingest-mix_task_compressed.md
 
 ```
 **Naming**
