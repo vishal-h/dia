@@ -1,0 +1,173 @@
+# Step-by-Step Guide: Adding Groq (or any new LLM provider)
+
+## Step 1: Update get_ai_client/0 function
+# LOCATION: Find the get_ai_client() function
+# ACTION: ADD the new provider to the case statement
+
+defp get_ai_client() do
+  provider = System.get_env("LLM_PROVIDER") || Process.get(:workflow_opts, %{})[:ai_provider] || "openai"
+  
+  case provider do
+    "openai" -> get_openai_client()
+    "claude" -> get_claude_client() 
+    "ollama" -> get_ollama_client()
+    "vllm" -> get_vllm_client()
+    "groq" -> get_groq_client()        # ADD THIS LINE
+    _ -> {:error, "Unsupported LLM provider: #{provider}. Supported: openai, claude, ollama, vllm, groq"}  # UPDATE THIS LINE
+  end
+end
+
+## Step 2: Add provider-specific client function
+# LOCATION: Add this function after the other get_*_client() functions
+# ACTION: ADD this new function
+
+defp get_groq_client() do
+  api_key = System.get_env("GROQ_API_KEY") || Process.get(:workflow_opts, %{})[:ai_api_key]
+  
+  case {Code.ensure_loaded(Req), Code.ensure_loaded(Jason), api_key} do
+    {{:module, Req}, {:module, Jason}, key} when is_binary(key) -> {:ok, :groq}
+    {{:error, _}, _, _} -> {:error, "Missing Req dependency. Add {:req, \"~> 0.5\"} to mix.exs"}
+    {_, {:error, _}, _} -> {:error, "Missing Jason dependency. Add {:jason, \"~> 1.4\"} to mix.exs"}
+    {_, _, nil} -> {:error, "Missing GROQ_API_KEY environment variable"}
+    _ -> {:error, "Missing dependencies or API key"}
+  end
+end
+
+## Step 3: Update make_real_ai_request/1 function
+# LOCATION: Find the make_real_ai_request() function
+# ACTION: ADD the new provider case
+
+defp make_real_ai_request(prompt) do
+  case get_ai_client() do
+    {:ok, :openai} -> make_openai_request(prompt)
+    {:ok, :claude} -> make_claude_request(prompt)
+    {:ok, {:ollama, base_url}} -> make_ollama_request(prompt, base_url)
+    {:ok, {:vllm, base_url, api_key}} -> make_vllm_request(prompt, base_url, api_key)
+    {:ok, :groq} -> make_groq_request(prompt)    # ADD THIS LINE
+    {:error, reason} -> {:error, reason}
+  end
+end
+
+## Step 4: Add provider-specific request function
+# LOCATION: Add this function after the other make_*_request() functions
+# ACTION: ADD this new function (customize based on provider's API)
+
+defp make_groq_request(prompt) do
+  api_key = System.get_env("GROQ_API_KEY") || Process.get(:workflow_opts, %{})[:ai_api_key]
+  model = Process.get(:workflow_opts, %{})[:ai_model] || "llama3-8b-8192"  # Groq's default model
+  
+  request_body = %{
+    model: model,
+    messages: [
+      %{
+        role: "system", 
+        content: "You are an expert software architect analyzing Elixir codebases. Provide practical, actionable analysis based on the actual code provided."
+      },
+      %{
+        role: "user", 
+        content: prompt
+      }
+    ],
+    temperature: 0.3,
+    max_tokens: 1500,
+    stream: false
+  }
+  
+  debug_info("🤖 Calling Groq API...")
+  
+  case ensure_finch_started() do
+    :ok -> :ok
+    {:error, reason} -> {:error, "Failed to start HTTP client: #{reason}"}
+  end
+  
+  case Req.post("https://api.groq.com/openai/v1/chat/completions",  # Groq's API endpoint
+    headers: [authorization: "Bearer #{api_key}"],
+    json: request_body,
+    receive_timeout: 30_000,
+    finch: LlmWorkflow.Finch
+  ) do
+    {:ok, %Req.Response{status: 200, body: %{"choices" => [%{"message" => %{"content" => content}} | _]}}} ->
+      parse_ai_analysis_response(content)
+    {:ok, %Req.Response{status: status, body: error_body}} ->
+      {:error, "Groq API error #{status}: #{inspect(error_body)}"}
+    {:error, error} ->
+      {:error, "Request failed: #{inspect(error)}"}
+  end
+end
+
+## Step 5: Update help documentation
+# LOCATION: Find the show_help() function
+# ACTION: ADD Groq to the OPTIONS, LLM PROVIDERS, and ENVIRONMENT VARIABLES sections
+
+# In OPTIONS section, update this line:
+--ai-provider PROVIDER   LLM provider: openai|claude|ollama|vllm|groq (default: openai)
+
+# In LLM PROVIDERS section, ADD:
+      Groq:
+        --ai-provider=groq --ai-model=llama3-8b-8192
+        Requires: GROQ_API_KEY environment variable
+
+# In ENVIRONMENT VARIABLES section, ADD:
+      GROQ_API_KEY=your_groq_key
+
+# In EXAMPLES section, ADD:
+      # Groq
+      mix llm_workflow --feature=auth --type=enhancement --ai \\
+        --ai-provider=groq --ai-model=llama3-70b-8192
+
+## COMPLETE EXAMPLE: Adding Groq Support
+
+# 1. Research Groq's API documentation:
+# - API endpoint: https://api.groq.com/openai/v1/chat/completions
+# - Authentication: Bearer token
+# - Request format: OpenAI-compatible
+# - Available models: llama3-8b-8192, llama3-70b-8192, mixtral-8x7b-32768
+
+# 2. Default model selection:
+# Choose a good default model for code analysis (balance speed vs quality)
+model = Process.get(:workflow_opts, %{})[:ai_model] || "llama3-8b-8192"
+
+# 3. Environment variable naming:
+# Follow convention: PROVIDER_API_KEY
+api_key = System.get_env("GROQ_API_KEY")
+
+# 4. Error handling:
+# Provider-specific error messages for better debugging
+{:error, "Groq API error #{status}: #{inspect(error_body)}"}
+
+# 5. Documentation:
+# Clear setup instructions and examples
+
+## Testing Your New Provider
+
+# 1. Set up environment:
+export GROQ_API_KEY=your_groq_api_key_here
+
+# 2. Test with dry run:
+mix llm_workflow --feature=auth --type=enhancement --ai \
+  --ai-provider=groq --ai-model=llama3-8b-8192 --dry-run
+
+# 3. Verify API integration:
+mix llm_workflow --feature=auth --type=enhancement --ai \
+  --ai-provider=groq --verbose
+
+## Provider-Specific Considerations
+
+# Different API formats:
+# - OpenAI-compatible: groq, vllm (use same request structure)
+# - Custom format: claude, ollama (need custom request builders)
+# - Authentication: Bearer token vs API key header vs no auth
+
+# Model naming conventions:
+# - OpenAI: gpt-4o-mini, gpt-4o
+# - Claude: claude-3-5-sonnet-20241022
+# - Groq: llama3-8b-8192, mixtral-8x7b-32768
+# - Ollama: llama3.1:8b, codellama:7b
+
+# Rate limits and timeouts:
+# - Adjust receive_timeout based on provider speed
+# - Some providers are faster (Groq) vs slower (local Ollama)
+
+# Response parsing:
+# - Most providers return same format, but check for differences
+# - Some might have different JSON structure for choices/content
