@@ -52,76 +52,261 @@ defmodule Mix.Tasks.LlmTrace do
     if opts[:help] do
       show_help()
     else
-      target = case remaining_args do
-        [target] -> target
+      case remaining_args do
+        ["list"] ->
+          list_features()
+        [target] ->
+          run_trace_workflow(target, opts)
+        [] ->
+          Mix.shell().error("Error: Target function required or use 'list' command. Use --help for usage information.")
+          System.halt(1)
         _ ->
-          Mix.shell().error("Error: Target function required. Use --help for usage information.")
+          Mix.shell().error("Error: Too many arguments. Use --help for usage information.")
           System.halt(1)
       end
-
-      feature_name = opts[:name] || infer_feature_name(target)
-      depth = opts[:depth] || 5
-      use_runtime = opts[:runtime] || false
-      include_tests = opts[:include_tests] || true
-      verbose = opts[:verbose] || false
-      use_ai = opts[:ai] || false
-      ai_model = opts[:ai_model] || "gpt-4o-mini"
-      ai_api_key = opts[:ai_api_key] || System.get_env("OPENAI_API_KEY")
-
-      # Store options globally for helper functions
-      Process.put(:llm_trace_verbose, verbose)
-      Process.put(:llm_trace_ai_enabled, use_ai)
-      Process.put(:llm_trace_ai_model, ai_model)
-      Process.put(:llm_trace_ai_api_key, ai_api_key)
-
-      # Validate AI dependencies early if AI is requested
-      if opts[:ai] do
-        case validate_ai_dependencies() do
-          :ok -> :ok
-          {:error, message} ->
-            Mix.shell().error("AI features unavailable: #{message}")
-            Mix.shell().info("Continuing with basic tracing (no AI features)...")
-            Process.put(:llm_trace_ai_enabled, false)
-        end
-      end
-
-      Mix.shell().info("Tracing feature: #{feature_name}")
-      Mix.shell().info("Starting from: #{target}")
-
-      # Debug module discovery if verbose
-      if verbose, do: debug_module_discovery()
-
-      # Parse the target MFA
-      {module, function, arity} = parse_mfa(target)
-
-      # Choose tracing strategy
-      dependencies = if use_runtime do
-        # Store original MFA for runtime processing
-        Process.put(:runtime_trace_module, module)
-        Process.put(:runtime_trace_function, function)
-        Process.put(:runtime_trace_arity, arity)
-        trace_runtime_dependencies(module, function, arity, depth)
-      else
-        trace_static_dependencies(module, function, arity, depth)
-      end
-
-      # Convert to file patterns
-      patterns = dependencies_to_patterns(dependencies, include_tests)
-
-      # Generate feature configuration with optional AI enhancement
-      feature_config = if Process.get(:llm_trace_ai_enabled, false) do
-        enhance_with_ai(feature_name, dependencies, patterns)
-      else
-        generate_feature_config(feature_name, patterns)
-      end
-
-      # Output results
-      output_path = opts[:output] || "llm_features_traced.exs"
-      write_feature_config(output_path, feature_name, feature_config)
-
-      Mix.shell().info("Generated feature '#{feature_name}' in #{output_path}")
-      print_summary(dependencies, patterns)
     end
+  end
+
+  defp run_trace_workflow(target, opts) do
+    feature_name = opts[:name] || infer_feature_name(target)
+    depth = opts[:depth] || 5
+    use_runtime = opts[:runtime] || false
+    include_tests = opts[:include_tests] || true
+    verbose = opts[:verbose] || false
+    use_ai = opts[:ai] || false
+    ai_model = opts[:ai_model] || "gpt-4o-mini"
+    ai_api_key = opts[:ai_api_key] || System.get_env("OPENAI_API_KEY")
+
+    # Store options globally for helper functions
+    Process.put(:llm_trace_verbose, verbose)
+    Process.put(:llm_trace_ai_enabled, use_ai)
+    Process.put(:llm_trace_ai_model, ai_model)
+    Process.put(:llm_trace_ai_api_key, ai_api_key)
+
+    # Validate AI dependencies early if AI is requested
+    if opts[:ai] do
+      case validate_ai_dependencies() do
+        :ok -> :ok
+        {:error, message} ->
+          Mix.shell().error("AI features unavailable: #{message}")
+          Mix.shell().info("Continuing with basic tracing (no AI features)...")
+          Process.put(:llm_trace_ai_enabled, false)
+      end
+    end
+
+    Mix.shell().info("Tracing feature: #{feature_name}")
+    Mix.shell().info("Starting from: #{target}")
+
+    # Debug module discovery if verbose
+    if verbose, do: debug_module_discovery()
+
+    # Parse the target MFA
+    {module, function, arity} = parse_mfa(target)
+
+    # Choose tracing strategy
+    dependencies = if use_runtime do
+      # Store original MFA for runtime processing
+      Process.put(:runtime_trace_module, module)
+      Process.put(:runtime_trace_function, function)
+      Process.put(:runtime_trace_arity, arity)
+      trace_runtime_dependencies(module, function, arity, depth)
+    else
+      trace_static_dependencies(module, function, arity, depth)
+    end
+
+    # Convert to file patterns
+    patterns = dependencies_to_patterns(dependencies, include_tests)
+
+    # Generate feature configuration with optional AI enhancement
+    feature_config = if Process.get(:llm_trace_ai_enabled, false) do
+      enhance_with_ai(feature_name, dependencies, patterns)
+    else
+      generate_feature_config(feature_name, patterns)
+    end
+
+    # Output results
+    output_path = opts[:output] || "llm_features_traced.exs"
+    write_feature_config(output_path, feature_name, feature_config)
+
+    Mix.shell().info("Generated feature '#{feature_name}' in #{output_path}")
+    print_summary(dependencies, patterns)
+  end
+
+  defp list_features() do
+    Mix.shell().info("🔍 Discovering available features...\n")
+
+    # Check for feature configuration files
+    config_files = [
+      "llm_features_traced.exs",
+      "llm_features.exs",
+      "llm_features_enhanced.exs"
+    ]
+
+    found_configs = Enum.filter(config_files, &File.exists?/1)
+
+    if Enum.empty?(found_configs) do
+      Mix.shell().info("❌ No feature configuration files found.")
+      Mix.shell().info("\nTo create features:")
+      Mix.shell().info("  1. Trace a feature: mix llm_trace MyApp.Module.function/2 --name=my_feature")
+      Mix.shell().info("  2. Or create llm_features.exs manually")
+      print_example_config()
+      :ok
+    else
+      # Load and display features from each config file
+      found_configs
+      |> Enum.each(fn config_file ->
+        case load_config_file(config_file) do
+          {:ok, features} when map_size(features) > 0 ->
+            Mix.shell().info("📁 #{config_file}:")
+            display_features_from_file(features, config_file)
+            Mix.shell().info("")
+
+          {:ok, _} ->
+            Mix.shell().info("📁 #{config_file}: (empty)")
+
+          {:error, reason} ->
+            Mix.shell().error("❌ Failed to load #{config_file}: #{reason}")
+        end
+      end)
+
+      # Load all features for summary
+      all_features = load_all_features(found_configs)
+
+      if map_size(all_features) > 0 do
+        print_features_summary(all_features)
+        print_usage_examples()
+      end
+    end
+  end
+
+  defp load_config_file(config_file) do
+    try do
+      {config, _} = Code.eval_file(config_file)
+      {:ok, config}
+    rescue
+      e -> {:error, inspect(e)}
+    end
+  end
+
+  defp display_features_from_file(features, config_file) do
+    features
+    |> Enum.sort_by(fn {name, _} -> name end)
+    |> Enum.each(fn {feature_name, config} ->
+      display_single_feature(feature_name, config, config_file)
+    end)
+  end
+
+  defp display_single_feature(feature_name, config, config_file) do
+    # Extract basic info
+    include_patterns = get_config_value(config, :include, "")
+    description = get_config_value(config, :description, "No description")
+    complexity = get_config_value(config, :complexity, nil)
+
+    # Show feature with color coding based on source
+    source_indicator = case config_file do
+      "llm_features_traced.exs" -> "🤖"  # AI-generated
+      "llm_features.exs" -> "✏️"          # Manual
+      _ -> "📝"                           # Other
+    end
+
+    Mix.shell().info("  #{source_indicator} #{feature_name}")
+
+    # Show description (truncated if too long)
+    desc_preview = if String.length(description) > 60 do
+      String.slice(description, 0, 57) <> "..."
+    else
+      description
+    end
+    Mix.shell().info("     #{desc_preview}")
+
+    # Show metadata if available
+    metadata_parts = []
+
+    metadata_parts = if complexity do
+      ["complexity: #{complexity}" | metadata_parts]
+    else
+      metadata_parts
+    end
+
+    metadata_parts = if include_patterns && include_patterns != "" do
+      pattern_count = String.split(include_patterns, ",") |> length()
+      ["#{pattern_count} file patterns" | metadata_parts]
+    else
+      metadata_parts
+    end
+
+    if length(metadata_parts) > 0 do
+      Mix.shell().info("     #{Enum.join(Enum.reverse(metadata_parts), " • ")}")
+    end
+  end
+
+  defp get_config_value(config, key, default) when is_map(config) do
+    Map.get(config, key) || Map.get(config, to_string(key), default)
+  end
+  defp get_config_value(config, key, default) when is_list(config) do
+    Keyword.get(config, key) || Keyword.get(config, String.to_atom(to_string(key)), default)
+  end
+  defp get_config_value(_, _, default), do: default
+
+  defp load_all_features(config_files) do
+    config_files
+    |> Enum.reduce(%{}, fn config_file, acc ->
+      case load_config_file(config_file) do
+        {:ok, features} -> Map.merge(acc, features)
+        {:error, _} -> acc
+      end
+    end)
+  end
+
+  defp print_features_summary(all_features) do
+    feature_count = map_size(all_features)
+
+    # Count by source file type (more reliable than checking AI indicators)
+    {ai_features, manual_features} = count_features_by_source()
+
+    Mix.shell().info("📊 Summary:")
+    Mix.shell().info("   #{feature_count} total features")
+
+    if ai_features > 0 or manual_features > 0 do
+      Mix.shell().info("   #{ai_features} AI-generated, #{manual_features} manual")
+    end
+
+    Mix.shell().info("")
+  end
+
+  defp count_features_by_source() do
+    config_files = [
+      {"llm_features_traced.exs", :ai},
+      {"llm_features.exs", :manual},
+      {"llm_features_enhanced.exs", :manual}
+    ]
+
+    {ai_count, manual_count} = config_files
+    |> Enum.reduce({0, 0}, fn {file, type}, {ai_acc, manual_acc} ->
+      if File.exists?(file) do
+        case load_config_file(file) do
+          {:ok, features} ->
+            count = map_size(features)
+            case type do
+              :ai -> {ai_acc + count, manual_acc}
+              :manual -> {ai_acc, manual_acc + count}
+            end
+          {:error, _} -> {ai_acc, manual_acc}
+        end
+      else
+        {ai_acc, manual_acc}
+      end
+    end)
+
+    {ai_count, manual_count}
+  end
+
+  defp print_usage_examples() do
+    Mix.shell().info("💡 Usage Examples:")
+    Mix.shell().info("   mix llm_ingest --feature=FEATURE_NAME")
+    Mix.shell().info("   mix llm_workflow --feature=FEATURE_NAME --type=enhancement")
+    Mix.shell().info("   mix llm_trace MyApp.Module.function/2 --name=new_feature")
+    Mix.shell().info("")
   end
 
   # Helper function for conditional debug output
@@ -137,6 +322,10 @@ defmodule Mix.Tasks.LlmTrace do
 
     USAGE:
         mix llm_trace <MODULE.FUNCTION/ARITY> [OPTIONS]
+        mix llm_trace list
+
+    COMMANDS:
+        list                     List all available features from configuration files
 
     ARGUMENTS:
         MODULE.FUNCTION/ARITY    Target function to trace (e.g., MyApp.Router.route/2)
@@ -168,6 +357,9 @@ defmodule Mix.Tasks.LlmTrace do
         --help                  Show this help message
 
     EXAMPLES:
+        # List available features
+        mix llm_trace list
+
         # Basic usage with static analysis
         mix llm_trace MyApp.Router.route/4 --name=routing
 
@@ -1535,6 +1727,26 @@ defmodule Mix.Tasks.LlmTrace do
     |> Enum.each(fn pattern ->
       Mix.shell().info("  - #{pattern}")
     end)
+  end
+
+  defp print_example_config do
+    example = """
+
+    Example llm_features.exs:
+    %{
+      "auth" => %{
+        include: "lib/auth/**,test/auth/**,priv/repo/migrations/*_auth_*",
+        exclude: "**/*_test.exs"
+      },
+      "api" => %{
+        include: "lib/api/**,lib/schemas/**,test/api/**"
+      },
+      "frontend" => %{
+        include: "assets/**,lib/*_web/**,test/*_web/**"
+      }
+    }
+    """
+    Mix.shell().info(example)
   end
 
   defp infer_feature_name(target) do
