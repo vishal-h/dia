@@ -466,7 +466,32 @@ defmodule Mix.Tasks.LlmWorkflow do
 
     ---
     *This ticket was automatically generated using AI analysis of the codebase.*
+    #{get_ai_provider_info()}
     """
+  end
+
+  defp get_ai_provider_info() do
+    opts = Process.get(:workflow_opts, %{})
+    provider = System.get_env("LLM_PROVIDER") || opts[:ai_provider] || "openai"
+    model = opts[:ai_model] || get_default_model(provider)
+
+    """
+    *AI Provider: #{provider}*
+    *Model: #{model}*
+    """
+  end
+
+  defp get_default_model(provider) do
+    case provider do
+      "openai" -> "gpt-4o-mini"
+      "claude" -> "claude-3-5-sonnet-20241022"
+      "ollama" -> "llama3.1:8b"
+      "groq" -> "llama3-8b-8192"
+      "perplexity" -> "llama-3-sonar-small-32k-chat"
+      "cohere" -> "command-r-plus"
+      "openrouter" -> "moonshotai/kimi-dev-72b:free"
+      _ -> "unknown"
+    end
   end
 
   # === AI API CALLS ===
@@ -491,6 +516,7 @@ defmodule Mix.Tasks.LlmWorkflow do
       {:ok, :groq} -> make_groq_request(prompt)
       {:ok, :perplexity} -> make_perplexity_request(prompt)
       {:ok, :cohere} -> make_cohere_request(prompt)
+      {:ok, :openrouter} -> make_openrouter_request(prompt)
       {:error, reason} -> {:error, reason}
     end
   end
@@ -802,6 +828,55 @@ defmodule Mix.Tasks.LlmWorkflow do
     end
   end
 
+  defp make_openrouter_request(prompt) do
+    api_key =
+      System.get_env("OPENROUTER_API_KEY") || Process.get(:workflow_opts, %{})[:ai_api_key]
+
+    model = Process.get(:workflow_opts, %{})[:ai_model] || "moonshotai/kimi-dev-72b:free"
+
+    request_body = %{
+      model: model,
+      messages: [
+        %{
+          role: "system",
+          content: "You are an expert software architect analyzing Elixir codebases."
+        },
+        %{role: "user", content: prompt}
+      ],
+      temperature: 0.3,
+      max_tokens: 1500
+    }
+
+    debug_info("🤖 Calling OpenRouter API...")
+
+    ensure_finch_started()
+
+    case Req.post("https://openrouter.ai/api/v1/chat/completions",
+           headers: [
+             authorization: "Bearer #{api_key}",
+             "content-type": "application/json",
+             # Optional but recommended
+             "HTTP-Referer": "https://yourapp.example.com"
+           ],
+           json: request_body,
+           receive_timeout: 30_000,
+           finch: LlmWorkflow.Finch
+         ) do
+      {:ok,
+       %Req.Response{
+         status: 200,
+         body: %{"choices" => [%{"message" => %{"content" => content}} | _]}
+       }} ->
+        parse_ai_analysis_response(content)
+
+      {:ok, %Req.Response{status: status, body: error_body}} ->
+        {:error, "OpenRouter API error #{status}: #{inspect(error_body)}"}
+
+      {:error, error} ->
+        {:error, "Request failed: #{inspect(error)}"}
+    end
+  end
+
   defp parse_ai_analysis_response(content) do
     # Try to extract JSON from the response
     case extract_json_from_response(content) do
@@ -890,9 +965,12 @@ defmodule Mix.Tasks.LlmWorkflow do
       "cohere" ->
         get_cohere_client()
 
+      "openrouter" ->
+        get_openrouter_client()
+
       _ ->
         {:error,
-         "Unsupported LLM provider: #{provider}. Supported: openai, claude, ollama, vllm, groq, perplexity, cohere"}
+         "Unsupported LLM provider: #{provider}. Supported: openai, claude, ollama, vllm, groq, perplexity, cohere, openrouter"}
     end
   end
 
@@ -976,74 +1054,89 @@ defmodule Mix.Tasks.LlmWorkflow do
   end
 
   defp get_groq_client() do
-    base_url =
-      System.get_env("GROQ_BASE_URL") || Process.get(:workflow_opts, %{})[:groq_base_url] ||
-        "https://api.groq.com/openai/v1"
+    api_key = System.get_env("GROQ_API_KEY") || Process.get(:workflow_opts, %{})[:ai_api_key]
 
-    api_key = System.get_env("GROQ_API_KEY") || Process.get(:workflow_opts, %{})[:groq_api_key]
+    case {Code.ensure_loaded(Req), Code.ensure_loaded(Jason), api_key} do
+      {{:module, Req}, {:module, Jason}, key} when is_binary(key) ->
+        {:ok, :groq}
 
-    if !api_key do
-      {:error, "Missing GROQ_API_KEY environment variable"}
-    else
-      case {Code.ensure_loaded(Req), Code.ensure_loaded(Jason)} do
-        {{:module, Req}, {:module, Jason}} ->
-          {:ok, {:groq, base_url, api_key}}
+      {{:error, _}, _, _} ->
+        {:error, "Missing Req dependency. Add {:req, \"~> 0.5\"} to mix.exs"}
 
-        {{:error, _}, _} ->
-          {:error, "Missing Req dependency. Add {:req, \"~> 0.5\"} to mix.exs"}
+      {_, {:error, _}, _} ->
+        {:error, "Missing Jason dependency. Add {:jason, \"~> 1.4\"} to mix.exs"}
 
-        {_, {:error, _}} ->
-          {:error, "Missing Jason dependency. Add {:jason, \"~> 1.4\"} to mix.exs"}
-      end
+      {_, _, nil} ->
+        {:error, "Missing GROQ_API_KEY environment variable"}
+
+      _ ->
+        {:error, "Missing dependencies or API key"}
     end
   end
 
   defp get_perplexity_client() do
-    base_url =
-      System.get_env("PERPLEXITY_BASE_URL") ||
-        Process.get(:workflow_opts, %{})[:perplexity_base_url] || "https://api.perplexity.ai"
-
     api_key =
-      System.get_env("PERPLEXITY_API_KEY") ||
-        Process.get(:workflow_opts, %{})[:perplexity_api_key]
+      System.get_env("PERPLEXITY_API_KEY") || Process.get(:workflow_opts, %{})[:ai_api_key]
 
-    if !api_key do
-      {:error, "Missing PERPLEXITY_API_KEY environment variable"}
-    else
-      case {Code.ensure_loaded(Req), Code.ensure_loaded(Jason)} do
-        {{:module, Req}, {:module, Jason}} ->
-          {:ok, {:perplexity, base_url, api_key}}
+    case {Code.ensure_loaded(Req), Code.ensure_loaded(Jason), api_key} do
+      {{:module, Req}, {:module, Jason}, key} when is_binary(key) ->
+        {:ok, :perplexity}
 
-        {{:error, _}, _} ->
-          {:error, "Missing Req dependency. Add {:req, \"~> 0.5\"} to mix.exs"}
+      {{:error, _}, _, _} ->
+        {:error, "Missing Req dependency. Add {:req, \"~> 0.5\"} to mix.exs"}
 
-        {_, {:error, _}} ->
-          {:error, "Missing Jason dependency. Add {:jason, \"~> 1.4\"} to mix.exs"}
-      end
+      {_, {:error, _}, _} ->
+        {:error, "Missing Jason dependency. Add {:jason, \"~> 1.4\"} to mix.exs"}
+
+      {_, _, nil} ->
+        {:error, "Missing PERPLEXITY_API_KEY environment variable"}
+
+      _ ->
+        {:error, "Missing dependencies or API key"}
     end
   end
 
   defp get_cohere_client() do
-    base_url =
-      System.get_env("COHERE_BASE_URL") || Process.get(:workflow_opts, %{})[:cohere_base_url] ||
-        "https://api.cohere.ai/v1"
+    api_key = System.get_env("COHERE_API_KEY") || Process.get(:workflow_opts, %{})[:ai_api_key]
 
+    case {Code.ensure_loaded(Req), Code.ensure_loaded(Jason), api_key} do
+      {{:module, Req}, {:module, Jason}, key} when is_binary(key) ->
+        {:ok, :cohere}
+
+      {{:error, _}, _, _} ->
+        {:error, "Missing Req dependency. Add {:req, \"~> 0.5\"} to mix.exs"}
+
+      {_, {:error, _}, _} ->
+        {:error, "Missing Jason dependency. Add {:jason, \"~> 1.4\"} to mix.exs"}
+
+      {_, _, nil} ->
+        {:error, "Missing COHERE_API_KEY environment variable"}
+
+      _ ->
+        {:error, "Missing dependencies or API key"}
+    end
+  end
+
+  defp get_openrouter_client() do
     api_key =
-      System.get_env("COHERE_API_KEY") || Process.get(:workflow_opts, %{})[:cohere_api_key]
+      System.get_env("OPENROUTER_API_KEY") ||
+        Process.get(:workflow_opts, %{})[:ai_api_key]
 
-    if !api_key do
-      {:error, "Missing COHERE_API_KEY environment variable"}
-    else
-      case {Code.ensure_loaded(Req), Code.ensure_loaded(Jason)} do
-        {{:module, Req}, {:module, Jason}} ->
-          {:ok, {:cohere, base_url, api_key}}
+    case {Code.ensure_loaded(Req), Code.ensure_loaded(Jason), api_key} do
+      {{:module, Req}, {:module, Jason}, key} when is_binary(key) ->
+        {:ok, :openrouter}
 
-        {{:error, _}, _} ->
-          {:error, "Missing Req dependency. Add {:req, \"~> 0.5\"} to mix.exs"}
+      {{:error, _}, _, _} ->
+        {:error, "Missing Req dependency. Add {:req, \"~> 0.5\"} to mix.exs"}
 
-        {_, {:error, _}} ->
-          {:error, "Missing Jason dependency. Add {:jason, \"~> 1.4\"} to mix.exs"}
-      end
+      {_, {:error, _}, _} ->
+        {:error, "Missing Jason dependency. Add {:jason, \"~> 1.4\"} to mix.exs"}
+
+      {_, _, nil} ->
+        {:error, "Missing OPENROUTER_API_KEY environment variable"}
+
+      _ ->
+        {:error, "Missing dependencies or API key"}
     end
   end
 
@@ -1444,6 +1537,13 @@ defmodule Mix.Tasks.LlmWorkflow do
         --ai-provider=cohere --ai-model=MODEL_NAME
         Default URL: https://api.cohere.ai/v1
         Requires: COHERE_API_KEY
+
+        OpenRouter:
+        --ai-provider=openrouter --ai-model=MODEL_ID
+        Default URL: https://openrouter.ai/api/v1
+        Default Model ID: moonshotai/kimi-dev-72b:free
+        Requires: OPENROUTER_API_KEY
+        Note: Model IDs follow format "provider/model" (e.g. "anthropic/claude-3-opus")
 
 
     ENVIRONMENT VARIABLES:

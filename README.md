@@ -87,6 +87,8 @@ iex> mix llm_ingest --feature=function_exporter
 
 iex> mix llm_ingest --feature=function_exporter_json
 
+iex> mix llm_workflow --feature=query_parser --type=bug --ai --ai-provider=openrouter --ai-model=qwen/qwen3-235b-a22b-07-25:free  --no-dry-run
+
 
 ```
 **Naming**
