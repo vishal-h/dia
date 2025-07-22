@@ -934,6 +934,32 @@ defmodule Mix.Tasks.LlmWorkflow do
         # Analyze all features (dry-run)
         mix llm_workflow --analyze-all --ai
 
+    CUSTOM BUG CREATION:
+        Create specific bugs with AI-generated context based on your code:
+
+        # AI analyzes code and identifies potential bugs
+        mix llm_workflow --feature=query_parser --type=bug --ai
+
+        # Custom bug with AI-enhanced analysis
+        mix llm_workflow --feature=worker --type=bug --ai \\
+          --title="Memory leak in query processing" \\
+          --priority=high --labels="performance,memory"
+
+        # Specific bug scenarios
+        mix llm_workflow --feature=database --type=bug --ai \\
+          --title="Connection pool exhaustion under load" \\
+          --priority=critical
+
+        # Documentation bugs (missing docs that cause issues)
+        mix llm_workflow --feature=api --type=documentation --ai \\
+          --title="Missing error handling documentation"
+
+        AI generates realistic bugs including:
+        - Technical details based on your actual code
+        - Acceptance criteria with actionable steps
+        - Risk assessment and mitigation strategies
+        - Effort estimates and affected files from your codebase
+
     WORKFLOW:
         1. 📝 Generate feature context using llm_ingest
         2. 🤖 AI analyzes code for improvements/bugs/etc. (if --ai flag used)
