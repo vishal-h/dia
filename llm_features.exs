@@ -4,7 +4,7 @@
     exclude: "**/*_test.exs"
   },
   "mix_task" => %{
-    include: "lib/mix/tasks/**"
+    include: "lib/mix/tasks/**,docs/add-llm-provider.txt"
     # exclude: "**/*_test.exs"
   }
 }
