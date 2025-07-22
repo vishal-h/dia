@@ -488,6 +488,9 @@ defmodule Mix.Tasks.LlmWorkflow do
       {:ok, :claude} -> make_claude_request(prompt)
       {:ok, {:ollama, base_url}} -> make_ollama_request(prompt, base_url)
       {:ok, {:vllm, base_url, api_key}} -> make_vllm_request(prompt, base_url, api_key)
+      {:ok, :groq} -> make_groq_request(prompt)
+      {:ok, :perplexity} -> make_perplexity_request(prompt)
+      {:ok, :cohere} -> make_cohere_request(prompt)
       {:error, reason} -> {:error, reason}
     end
   end
@@ -667,6 +670,138 @@ defmodule Mix.Tasks.LlmWorkflow do
     end
   end
 
+  defp make_groq_request(prompt) do
+    api_key = System.get_env("GROQ_API_KEY") || Process.get(:workflow_opts, %{})[:ai_api_key]
+    model = Process.get(:workflow_opts, %{})[:ai_model] || "llama3-8b-8192"
+
+    request_body = %{
+      model: model,
+      messages: [
+        %{
+          role: "system",
+          content: "You are an expert software architect analyzing Elixir codebases."
+        },
+        %{role: "user", content: prompt}
+      ],
+      temperature: 0.3,
+      max_tokens: 1500,
+      stream: false
+    }
+
+    debug_info("🤖 Calling Groq API...")
+
+    ensure_finch_started()
+
+    case Req.post("https://api.groq.com/openai/v1/chat/completions",
+           headers: [authorization: "Bearer #{api_key}"],
+           json: request_body,
+           receive_timeout: 30_000,
+           finch: LlmWorkflow.Finch
+         ) do
+      {:ok,
+       %Req.Response{
+         status: 200,
+         body: %{"choices" => [%{"message" => %{"content" => content}} | _]}
+       }} ->
+        parse_ai_analysis_response(content)
+
+      {:ok, %Req.Response{status: status, body: error_body}} ->
+        {:error, "Groq API error #{status}: #{inspect(error_body)}"}
+
+      {:error, error} ->
+        {:error, "Request failed: #{inspect(error)}"}
+    end
+  end
+
+  defp make_perplexity_request(prompt) do
+    api_key =
+      System.get_env("PERPLEXITY_API_KEY") || Process.get(:workflow_opts, %{})[:ai_api_key]
+
+    model = Process.get(:workflow_opts, %{})[:ai_model] || "llama-3-sonar-small-32k-chat"
+
+    request_body = %{
+      model: model,
+      messages: [
+        %{
+          role: "system",
+          content: "You are an expert software architect analyzing Elixir codebases."
+        },
+        %{role: "user", content: prompt}
+      ],
+      temperature: 0.3,
+      max_tokens: 1500
+    }
+
+    debug_info("🤖 Calling Perplexity API...")
+
+    ensure_finch_started()
+
+    case Req.post("https://api.perplexity.ai/chat/completions",
+           headers: [
+             authorization: "Bearer #{api_key}",
+             "content-type": "application/json"
+           ],
+           json: request_body,
+           receive_timeout: 30_000,
+           finch: LlmWorkflow.Finch
+         ) do
+      {:ok,
+       %Req.Response{
+         status: 200,
+         body: %{"choices" => [%{"message" => %{"content" => content}} | _]}
+       }} ->
+        parse_ai_analysis_response(content)
+
+      {:ok, %Req.Response{status: status, body: error_body}} ->
+        {:error, "Perplexity API error #{status}: #{inspect(error_body)}"}
+
+      {:error, error} ->
+        {:error, "Request failed: #{inspect(error)}"}
+    end
+  end
+
+  defp make_cohere_request(prompt) do
+    api_key = System.get_env("COHERE_API_KEY") || Process.get(:workflow_opts, %{})[:ai_api_key]
+    model = Process.get(:workflow_opts, %{})[:ai_model] || "command-r-plus"
+
+    request_body = %{
+      model: model,
+      messages: [
+        %{
+          role: "system",
+          content: "You are an expert software architect analyzing Elixir codebases."
+        },
+        %{role: "user", content: prompt}
+      ],
+      temperature: 0.3,
+      max_tokens: 1500,
+      stream: false
+    }
+
+    debug_info("🤖 Calling Cohere API...")
+
+    ensure_finch_started()
+
+    case Req.post("https://api.cohere.ai/v1/chat",
+           headers: [
+             authorization: "Bearer #{api_key}",
+             "content-type": "application/json"
+           ],
+           json: request_body,
+           receive_timeout: 30_000,
+           finch: LlmWorkflow.Finch
+         ) do
+      {:ok, %Req.Response{status: 200, body: %{"text" => content}}} ->
+        parse_ai_analysis_response(content)
+
+      {:ok, %Req.Response{status: status, body: error_body}} ->
+        {:error, "Cohere API error #{status}: #{inspect(error_body)}"}
+
+      {:error, error} ->
+        {:error, "Request failed: #{inspect(error)}"}
+    end
+  end
+
   defp parse_ai_analysis_response(content) do
     # Try to extract JSON from the response
     case extract_json_from_response(content) do
@@ -746,8 +881,18 @@ defmodule Mix.Tasks.LlmWorkflow do
       "vllm" ->
         get_vllm_client()
 
+      "groq" ->
+        get_groq_client()
+
+      "perplexity" ->
+        get_perplexity_client()
+
+      "cohere" ->
+        get_cohere_client()
+
       _ ->
-        {:error, "Unsupported LLM provider: #{provider}. Supported: openai, claude, ollama, vllm"}
+        {:error,
+         "Unsupported LLM provider: #{provider}. Supported: openai, claude, ollama, vllm, groq, perplexity, cohere"}
     end
   end
 
@@ -820,6 +965,78 @@ defmodule Mix.Tasks.LlmWorkflow do
       case {Code.ensure_loaded(Req), Code.ensure_loaded(Jason)} do
         {{:module, Req}, {:module, Jason}} ->
           {:ok, {:vllm, base_url, api_key}}
+
+        {{:error, _}, _} ->
+          {:error, "Missing Req dependency. Add {:req, \"~> 0.5\"} to mix.exs"}
+
+        {_, {:error, _}} ->
+          {:error, "Missing Jason dependency. Add {:jason, \"~> 1.4\"} to mix.exs"}
+      end
+    end
+  end
+
+  defp get_groq_client() do
+    base_url =
+      System.get_env("GROQ_BASE_URL") || Process.get(:workflow_opts, %{})[:groq_base_url] ||
+        "https://api.groq.com/openai/v1"
+
+    api_key = System.get_env("GROQ_API_KEY") || Process.get(:workflow_opts, %{})[:groq_api_key]
+
+    if !api_key do
+      {:error, "Missing GROQ_API_KEY environment variable"}
+    else
+      case {Code.ensure_loaded(Req), Code.ensure_loaded(Jason)} do
+        {{:module, Req}, {:module, Jason}} ->
+          {:ok, {:groq, base_url, api_key}}
+
+        {{:error, _}, _} ->
+          {:error, "Missing Req dependency. Add {:req, \"~> 0.5\"} to mix.exs"}
+
+        {_, {:error, _}} ->
+          {:error, "Missing Jason dependency. Add {:jason, \"~> 1.4\"} to mix.exs"}
+      end
+    end
+  end
+
+  defp get_perplexity_client() do
+    base_url =
+      System.get_env("PERPLEXITY_BASE_URL") ||
+        Process.get(:workflow_opts, %{})[:perplexity_base_url] || "https://api.perplexity.ai"
+
+    api_key =
+      System.get_env("PERPLEXITY_API_KEY") ||
+        Process.get(:workflow_opts, %{})[:perplexity_api_key]
+
+    if !api_key do
+      {:error, "Missing PERPLEXITY_API_KEY environment variable"}
+    else
+      case {Code.ensure_loaded(Req), Code.ensure_loaded(Jason)} do
+        {{:module, Req}, {:module, Jason}} ->
+          {:ok, {:perplexity, base_url, api_key}}
+
+        {{:error, _}, _} ->
+          {:error, "Missing Req dependency. Add {:req, \"~> 0.5\"} to mix.exs"}
+
+        {_, {:error, _}} ->
+          {:error, "Missing Jason dependency. Add {:jason, \"~> 1.4\"} to mix.exs"}
+      end
+    end
+  end
+
+  defp get_cohere_client() do
+    base_url =
+      System.get_env("COHERE_BASE_URL") || Process.get(:workflow_opts, %{})[:cohere_base_url] ||
+        "https://api.cohere.ai/v1"
+
+    api_key =
+      System.get_env("COHERE_API_KEY") || Process.get(:workflow_opts, %{})[:cohere_api_key]
+
+    if !api_key do
+      {:error, "Missing COHERE_API_KEY environment variable"}
+    else
+      case {Code.ensure_loaded(Req), Code.ensure_loaded(Jason)} do
+        {{:module, Req}, {:module, Jason}} ->
+          {:ok, {:cohere, base_url, api_key}}
 
         {{:error, _}, _} ->
           {:error, "Missing Req dependency. Add {:req, \"~> 0.5\"} to mix.exs"}
@@ -1194,20 +1411,40 @@ defmodule Mix.Tasks.LlmWorkflow do
 
     LLM PROVIDERS:
         OpenAI:
-          --ai-provider=openai --ai-model=gpt-4o-mini
-          Requires: OPENAI_API_KEY environment variable
+        --ai-provider=openai --ai-model=MODEL_NAME
+        Default URL: https://api.openai.com/v1
+        Requires: OPENAI_API_KEY
 
         Claude (Anthropic):
-          --ai-provider=claude --ai-model=claude-3-5-sonnet-20241022
-          Requires: ANTHROPIC_API_KEY environment variable
+        --ai-provider=claude --ai-model=MODEL_NAME
+        Default URL: https://api.anthropic.com
+        Requires: ANTHROPIC_API_KEY
 
         Ollama (Local):
-          --ai-provider=ollama --ai-model=llama3.1:8b --ai-base-url=http://localhost:11434
-          Requires: Ollama running locally or OLLAMA_BASE_URL
+        --ai-provider=ollama --ai-model=MODEL_NAME
+        Default URL: http://localhost:11434
+        Requires: Ollama running locally (or set OLLAMA_BASE_URL)
 
         vLLM (Self-hosted):
-          --ai-provider=vllm --ai-base-url=http://your-vllm-server:8000
-          Optional: VLLM_API_KEY for authenticated endpoints
+        --ai-provider=vllm --ai-base-url=YOUR_URL
+        No default URL (must be specified)
+        Optional: VLLM_API_KEY for authenticated endpoints
+
+        Groq:
+        --ai-provider=groq --ai-model=MODEL_NAME
+        Default URL: https://api.groq.com/openai/v1
+        Requires: GROQ_API_KEY
+
+        Perplexity:
+        --ai-provider=perplexity --ai-model=MODEL_NAME
+        Default URL: https://api.perplexity.ai
+        Requires: PERPLEXITY_API_KEY
+
+        Cohere:
+        --ai-provider=cohere --ai-model=MODEL_NAME
+        Default URL: https://api.cohere.ai/v1
+        Requires: COHERE_API_KEY
+
 
     ENVIRONMENT VARIABLES:
         LLM_PROVIDER=openai|claude|ollama|vllm
@@ -1216,6 +1453,10 @@ defmodule Mix.Tasks.LlmWorkflow do
         OLLAMA_BASE_URL=http://localhost:11434
         VLLM_BASE_URL=http://your-server:8000
         VLLM_API_KEY=your_vllm_key (optional)
+        GROQ_API_KEY=...
+        PERPLEXITY_API_KEY=...
+        COHERE_API_KEY=...
+
 
     WORKFLOW:
         1. 📝 Generate feature context using llm_ingest
