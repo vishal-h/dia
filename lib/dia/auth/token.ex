@@ -6,21 +6,14 @@ defmodule DIA.Auth.Token do
 
   # Helper function to compute expiration time (Unix timestamp)
   # 1 hour
-  defp default_expiry_seconds(), do: 3600
-
-  defp get_expiration_time() do
-    DateTime.utc_now()
-    |> DateTime.add(default_expiry_seconds())
-    |> DateTime.to_unix()
-  end
+  @expiry_in_seconds 3600
 
   # Token configuration (no chat_id)
   @impl true
   def token_config do
-    default_claims(skip: [:iss, :aud])
+    default_claims(skip: [:iss, :aud], default_expiry: @expiry_in_seconds)
     |> add_claim("user_id", nil, &(&1 != nil))
     |> add_claim("login_session_id", nil, &(&1 != nil))
-    |> add_claim("exp", get_expiration_time(), &(&1 > DateTime.utc_now() |> DateTime.to_unix()))
   end
 
   def encode(claims) when is_map(claims) do

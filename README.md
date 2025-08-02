@@ -9,6 +9,10 @@
 # This generates 64 cryptographically secure random bytes and encodes them using URL-safe Base64. A length of 64 bytes (512 bits) is generally recommended for strong secrets.
 iex> :crypto.strong_rand_bytes(64) |> Base.url_encode64(padding: false)
 
+iex>  {:ok, bearer_token, claims} = %{"user_id" => 1, "login_session_id" => 1} |> DIA.Auth.Token.encode
+
+iex> {:ok, claims} = bearer_token |> DIA.Auth.Token.decode
+
 # ensure extra_applications: [:logger, :observer, :wx] in mix.exs
 iex>:observer.start()
 
