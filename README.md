@@ -5,6 +5,11 @@
 
 ```elixir
 
+
+# This generates 64 cryptographically secure random bytes and encodes them using URL-safe Base64. A length of 64 bytes (512 bits) is generally recommended for strong secrets.
+iex> :crypto.strong_rand_bytes(64) |> Base.url_encode64(padding: false)
+
+# ensure extra_applications: [:logger, :observer, :wx] in mix.exs
 iex>:observer.start()
 
 iex> DIA.Agent.QueryParser.describe()
